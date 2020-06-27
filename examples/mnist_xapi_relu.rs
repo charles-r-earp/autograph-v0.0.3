@@ -223,7 +223,7 @@ fn main() {
     let mut eval_batch_size: usize = 1000;
     {
       let mut ap = ArgumentParser::new();
-      ap.set_description("MNIST Dense Example");
+      ap.set_description("MNIST Extend API ReLU Example");
       ap.refer(&mut epochs)
         .add_option(&["-e", "--epochs"], Store, "Number of epochs to train for.");
       ap.refer(&mut lr)
