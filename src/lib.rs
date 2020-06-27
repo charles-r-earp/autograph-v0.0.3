@@ -475,15 +475,19 @@ pub type RwReadTensor<'a, T, D> = TensorBase<RwReadRepr<'a, T>, D>;
 pub type RwWriteTensor<'a, T, D> = TensorBase<RwWriteRepr<'a, T>, D>;
 
 impl<T: Num, S: DataOwned<Elem=T>, D: Dimension> TensorBase<S, D> {
-  /// Constructs a Tensor on the device with the given shape, its data is unninitialized.
-  /// Unsafe: Rust generally marks these kinds of functions unsafe because reading uninitialized data is undefined behavior
-  /// Num is only implemented for types which are safe to read arbitrary bits, so generally this is safe
-  /// Use this prior an operation that will only write to the tensor and not read from it
   unsafe fn uninitialized(device: &Device, shape: impl IntoDimension<Dim=D>) -> Self {
     let device = device.clone();
     let dim = shape.into_dimension();
     let data = S::from_buffer(Buffer::uninitialized(&device, dim.size()));
     Self{device, dim, data}
+  }
+  /// Constructs a Tensor on the device with the given shape, its data is unninitialized.
+  /// Unsafe: Rust generally marks these kinds of functions unsafe because reading uninitialized data is undefined behavior
+  /// Num is only implemented for types which are safe to read arbitrary bits, so generally this is safe
+  /// Use this prior an operation that will only write to the tensor and not read from it
+  #[cfg(feature="xapi")]
+  pub unsafe fn xapi_uninitialized(device: &Device, shape: impl IntoDimension<Dim=D>) -> Self {
+    Self::uninitialized(device, shape)
   }
   /// Constructs a Tensor on the device with the given shape. If a Vec is provided, will move the data (ie no copy) if the device is a cpu. Can also provide a slice, which allows for the data to only be copied once (rather than twice in the case of copying to the gpu).
   /// Panics: Asserts that the provided shape matches the length of the provided vec or slice.
@@ -629,6 +633,10 @@ impl<T: Num, S: DataRef<Elem=T>, D: Dimension> TensorBase<S, D> {
       .cpu()
       .map(|b| b.as_slice())
   }
+  #[cfg(feature="xapi")]
+  pub fn xapi_as_cpu_slice(&self) -> Option<&[T]> {
+    self.as_cpu_slice()
+  }
   #[cfg(feature="cuda")]
   fn as_cuda_slice(&self) -> Option<&DeviceSlice<T>> {
     self.data.buffer()
@@ -726,6 +734,13 @@ impl<T: Num, S: DataMut<Elem=T>, D: Dimension> TensorBase<S, D> {
     self.data.buffer_mut()
       .cpu_mut()
       .map(|mut b| b.as_mut_slice())
+  }
+  /// Borrows the Tensor's data as a mutable slice\
+  /// Some: If the tensor is on the cpu\
+  /// Note: Unlike as_slice, this method returns None instead of copying into a vec and returning a Cow<[T]>
+  #[cfg(feature="xapi")]
+  pub fn xapi_as_mut_cpu_slice(&mut self) -> Option<&mut [T]> {
+    self.as_mut_cpu_slice()
   }
   #[cfg(feature="cuda")]
   fn as_mut_cuda_slice(&mut self) -> Option<&mut DeviceSlice<T>> {

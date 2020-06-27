@@ -92,8 +92,12 @@ impl<D: Dimension> Gradient<D> {
         PoisonError::new(x)
       })
   }
-  fn into_dyn(self) -> Gradient<IxDyn> {
+  fn into_dyn(self) -> GradientD {
     Gradient{tensor: self.tensor.into_dyn()}
+  }
+  #[cfg(feature="xapi")]
+  pub fn xapi_into_dyn(self) -> GradientD {
+    self.into_dyn()
   }
   fn into_dimensionality<D2: Dimension>(self) -> Option<Gradient<D2>> {
     self.tensor.clone().into_dimensionality()
@@ -113,7 +117,8 @@ pub mod backward_variable_op_proxy {
     CrossEntropyBackward,
     Conv2dBackwardInput,
     MaxPool2dBackward,
-    ReluBackward
+    ReluBackward,
+    BoxedOp
   };
   
   pub enum BackwardVariableOp {
@@ -121,7 +126,8 @@ pub mod backward_variable_op_proxy {
     CrossEntropyBackward(CrossEntropyBackward),
     Conv2dBackwardInput(Conv2dBackwardInput),
     MaxPool2dBackward(MaxPool2dBackward),
-    ReluBackward(ReluBackward)
+    ReluBackward(ReluBackward),
+    BoxedOp(BoxedOp)
   }
   
   impl BackwardVariableOp {
@@ -137,13 +143,15 @@ pub mod backward_parameter_op_proxy {
   use super::{
     DenseBackwardWeight,
     DenseBackwardBias,
-    Conv2dBackwardWeightBias
+    Conv2dBackwardWeightBias,
+    BoxedOp
   };
   
   pub enum BackwardParameterOp {
     DenseBackwardWeight(DenseBackwardWeight),
     DenseBackwardBias(DenseBackwardBias),
-    Conv2dBackwardWeightBias(Conv2dBackwardWeightBias)
+    Conv2dBackwardWeightBias(Conv2dBackwardWeightBias),
+    BoxedOp(BoxedOp)
   }
   
   impl BackwardParameterOp {
@@ -379,6 +387,40 @@ impl From<ReluBackward> for BackwardVariableOp {
   }
 }
 
+#[doc(hidden)]
+pub struct BoxedOp {
+  #[cfg(feature="xapi")]
+  f: Box<dyn Fn()>
+}
+
+impl BoxedOp {
+  fn exec(&self) {
+    #[cfg(feature="xapi")]
+    (self.f)()
+  }
+}
+
+#[cfg(feature="xapi")]
+impl<F: Fn() + 'static> From<F> for BoxedOp {
+  fn from(f: F) -> Self {
+    Self{f: Box::new(f)}
+  }
+}
+
+#[cfg(feature="xapi")]
+impl From<BoxedOp> for BackwardVariableOp {
+  fn from(op: BoxedOp) -> Self {
+    Self::BoxedOp(op)
+  }
+}
+
+#[cfg(feature="xapi")]
+impl From<BoxedOp> for BackwardParameterOp {
+  fn from(op: BoxedOp) -> Self {
+    Self::BoxedOp(op)
+  }
+}
+
 /// Stores backward ops on the forward pass. On the backward pass, executes variable ops in first in last out order (ie reverse) and then executes parameter ops in first in last out order.
 pub struct Graph {
   backward_variable_ops: Mutex<Vec<BackwardVariableOp>>,
@@ -398,10 +440,20 @@ impl Graph {
       .unwrap()
       .push(op.into());
   }
+  #[cfg(feature="xapi")]
+  /// Enqueues a backward op that computes a variable gradient
+  pub fn xapi_backward_variable_op(&self, op: impl Fn() + 'static) {
+    self.backward_variable_op(BoxedOp::from(op))
+  }
   fn backward_parameter_op(&self, op: impl Into<BackwardParameterOp>) {
     self.backward_parameter_ops.lock()
       .unwrap()
       .push(op.into());
+  }
+  /// Enqueues a backward op that computes a parameter gradient 
+  #[cfg(feature="xapi")]
+  pub fn xapi_backward_parameter_op(&self, op: impl Fn() + 'static) {
+    self.backward_parameter_op(BoxedOp::from(op))
   }
   fn exec_backward_variable_ops(&self) {
     self.backward_variable_ops.lock()
@@ -455,6 +507,10 @@ impl<D: Dimension> Variable<D> {
   /// Convienance accessor to self.value().device()
   pub fn device(&self) -> &Device {
     self.value.device()
+  }
+  #[cfg(feature="xapi")]
+  pub fn xapi_graph(&self) -> Option<Arc<Graph>> {
+    Weak::upgrade(&self.graph)
   }
   /// Returns a reference to the value of the variable
   pub fn value(&self) -> &ArcTensor<f32, D> {

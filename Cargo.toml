@@ -30,6 +30,7 @@ cpp_build = "0.5.4"
 [features]
 datasets = ["byteorder", "flate2", "reqwest"]
 cuda = ["rustacuda", "cuda-sys", "cuda-cudnn-sys"]
+xapi = []
 
 [dev-dependencies]
 rand = { version = "0.7.3", features=["small_rng"] }

@@ -11,7 +11,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }} 
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
@@ -32,6 +32,8 @@ jobs:
       run: cargo run --example mnist_dense -vv --features datasets -- --epochs 1
     - name: Run MNIST Lenet5 Example
       run: cargo run --example mnist_lenet5 -vv --features datasets -- --epochs 1
+    - name: Run MNIST Extend API ReLU Example
+      run: cargo run --example mnist_xapi_relu -vv --features "datasets xapi" -- --epochs 1 
   benchmark:
     runs-on: ubuntu-latest
     steps:

@@ -93,6 +93,7 @@ impl Stream {
 } 
 
 /// Threadsafe wrapper for oneDNN engine and stream
+/// see https://oneapi-src.github.io/oneDNN
 pub struct Cpu {
   engine: Engine,
   /// I don't know if we can cheaply construct a stream, and since operations modify the stream we must use a mutex. This means that cpu operations on the same Cpu are sequential. All cpu operations are blocking. Regardless, concurrent operations on cpu are allowed as a feature, but aren't necessarily optimal because the operations themselves are using multiple threads. So general use will not have contested locking of the stream.
@@ -105,6 +106,19 @@ impl Cpu {
     let engine = Engine::new();
     let stream = Mutex::new(Stream::new(&engine));
     Arc::new(Self{engine, stream})
+  }
+  /// Returns a reference to the cpu engine\
+  /// This is used for dnnl operations
+  #[cfg(feature="xapi")]
+  pub fn xapi_engine(&self) -> &Engine {
+    &self.engine
+  }
+  /// Returs a reference to the cpu stream wrapped in a Mutex\
+  /// This is used to enqueue operations\
+  /// The stream should be flushed (ie call wait()) prior to returning
+  #[cfg(feature="xapi")]
+  pub fn xapi_stream(&self) -> &Mutex<Stream> {
+    &self.stream
   }
 }
 
