@@ -7,8 +7,12 @@ fn main() {
             .include(env::var("DEP_DNNL_INCLUDE").unwrap())
             .build("src/lib.rs");
         println!("cargo:rustc-link-lib=static=dnnl");
-        println!("cargo:rustc-link-search={}", env::var("DEP_DNNL_OMP_LIB").unwrap());
-        println!("cargo:rustc-link-lib=dylib={}", env::var("DEP_DNNL_OMP").unwrap())
+        if let Ok(omp_lib) = env::var("DEP_DNNL_OMP_LIB") {
+            println!("cargo:rustc-link-search={}", omp_lib);
+        }
+        if let Ok(omp) = env::var("DEP_DNNL_OMP") {
+            println!("cargo:rustc-link-lib=dylib={}", omp);
+        }
     }
     #[cfg(feature = "cuda")]
     {

@@ -409,6 +409,8 @@ pub(super) fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32
             };
             
             assert_eq!(status, CLBlastSuccess);
+            
+            xpu.synchronize();
         });
 }
 
