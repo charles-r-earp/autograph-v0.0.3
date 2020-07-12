@@ -17,6 +17,28 @@ fn test_tensor_from_vec_cpu() {
 fn test_tensor_from_vec_cuda() {
     test_tensor_from_vec(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_tensor_from_vec_opencl() {
+    test_tensor_from_vec(OpenclXpu::new(0, None));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_opencl_write_on_read_only_buffer() {
+    let device = Device::from(OpenclXpu::new(0, None));
+    let n = 10;
+    let x = Tensor::<f32, _>::zeros(&device, n);
+    let result = std::panic::catch_unwind(|| {
+        unsafe {
+            x.as_ocl_buffer()
+                .unwrap()
+                .write(vec![1.; n].as_slice())
+                .enq()
+                .unwrap();
+        }
+    });
+    assert!(result.is_err());
+}
 fn test_u8_to_f32(device: impl Into<Device>) {
     let device = device.into();
     let vec: Vec<u8> = vec![1, 2, 3, 4];
@@ -34,6 +56,11 @@ fn test_u8_to_f32_cpu() {
 #[cfg(feature = "cuda")]
 fn test_u8_to_f32_cuda() {
     test_u8_to_f32(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_u8_to_f32_opencl() {
+    test_u8_to_f32(OpenclXpu::new(0, None));
 }
 fn test_u8_to_one_hot_f32(device: impl Into<Device>) {
     let device = device.into();
@@ -60,6 +87,11 @@ fn test_u8_to_one_hot_f32_cpu() {
 fn test_u8_to_one_hot_f32_cuda() {
     test_u8_to_one_hot_f32(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_u8_to_one_hot_f32_opencl() {
+    test_u8_to_one_hot_f32(OpenclXpu::new(0, None));
+}
 fn test_fill_u8(device: impl Into<Device>) {
     let device = device.into();
     let n = 10;
@@ -77,6 +109,11 @@ fn test_fill_u8_cpu() {
 fn test_fill_u8_cuda() {
     test_fill_u8(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_fill_u8_opencl() {
+    test_fill_u8(OpenclXpu::new(0, None));
+}
 fn test_fill_f32(device: impl Into<Device>) {
     let device = device.into();
     let n = 10;
@@ -93,6 +130,11 @@ fn test_fill_f32_cpu() {
 #[test]
 fn test_fill_f32_cuda() {
     test_fill_f32(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_fill_f32_opencl() {
+    test_fill_f32(OpenclXpu::new(0, None));
 }
 fn test_broadcast(device: impl Into<Device>) {
     let device = device.into();
@@ -112,6 +154,11 @@ fn test_broadcast_cpu() {
 fn test_broadcast_cuda() {
     test_broadcast(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_broadcast_opencl() {
+    test_broadcast(OpenclXpu::new(0, None));
+}
 fn test_broadcast_backward(device: impl Into<Device>) {
     let device = device.into();
     let mut dx = Tensor::zeros(&device, 4);
@@ -129,6 +176,11 @@ fn test_broadcast_backward_cpu() {
 #[test]
 fn test_broadcast_backward_cuda() {
     test_broadcast_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_broadcast_backward_opencl() {
+    test_broadcast_backward(OpenclXpu::new(0, None));
 }
 fn compare_vectors(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) {
     // dnnl and cuda have fast mul / approx ops
@@ -219,6 +271,11 @@ fn test_gemm_cpu() {
 fn test_gemm_cuda() {
     test_gemm(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_gemm_opencl() {
+    test_gemm(OpenclXpu::new(0, None));
+}
 fn test_sum(device: impl Into<Device>) {
     let device = device.into();
 
@@ -237,6 +294,11 @@ fn test_sum_cpu() {
 fn test_sum_cuda() {
     test_sum(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_sum_opencl() {
+    test_sum(OpenclXpu::new(0, None));
+}
 fn test_relu(device: impl Into<Device>) {
     let device = device.into();
     let x = Tensor::from_shape_vec(&device, 6, vec![-0.1, -100., 0.0, 0.1, 1., 100.]);
@@ -249,8 +311,14 @@ fn test_relu_cpu() {
     test_relu(Cpu::new());
 }
 #[cfg(feature = "cuda")]
+#[test]
 fn test_relu_cuda() {
     test_relu(CudaGpu::new(0));
+}
+#[cfg(feature = "cuda")]
+#[test]
+fn test_relu_opencl() {
+    test_relu(OpenclXpu::new(0, None));
 }
 fn test_relu_backward(device: impl Into<Device>) {
     let device = device.into();
@@ -303,6 +371,20 @@ fn test_scaled_add(device: impl Into<Device>) {
         lhs_true.as_slice().unwrap()
     );
 }
+#[test]
+fn test_scaled_add_cpu() {
+    test_scaled_add(Cpu::new());
+}
+#[cfg(feature = "cuda")]
+#[test]
+fn test_scaled_add_cuda() {
+    test_scaled_add(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_scaled_add_opencl() {
+    test_scaled_add(OpenclXpu::new(0, None));
+}
 fn test_cross_entropy(device: impl Into<Device>) {
     let device = device.into();
 
@@ -330,7 +412,9 @@ fn test_cross_entropy(device: impl Into<Device>) {
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => {
             cuda::cross_entropy(&input, &target, &mut output);
-        }
+        },
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => opencl::cross_entropy(&input, &target, &mut output)
     }
 
     let mut output_true = vec![0.; batch_size * nclasses];
@@ -368,6 +452,11 @@ fn test_cross_entropy_cpu() {
 #[test]
 fn test_cross_entropy_cuda() {
     test_cross_entropy(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_cross_entropy_opencl() {
+    test_cross_entropy(OpenclXpu::new(0, None));
 }
 fn test_cross_entropy_backward(device: impl Into<Device>) {
     let device = device.into();
@@ -417,6 +506,11 @@ fn test_cross_entropy_backward_cpu() {
 #[test]
 fn test_cross_entropy_backward_cuda() {
     test_cross_entropy_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_cross_entropy_backward_opencl() {
+    test_cross_entropy_backward(OpenclXpu::new(0, None));
 }
 fn test_conv2d_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
@@ -528,6 +622,11 @@ fn test_conv2d_cpu() {
 fn test_conv2d_cuda() {
     test_conv2d(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_conv2d_opencl() {
+    test_conv2d(OpenclXpu::new(0, None));
+}
 fn test_conv2d_backward_input_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     outputs: usize,
@@ -623,6 +722,11 @@ fn test_conv2d_backward_input_cpu() {
 fn test_conv2d_backward_input_cuda() {
     test_conv2d_backward_input(CudaGpu::new(0));
 }
+/*#[cfg(feature = "opencl")]
+#[test]
+fn test_conv2d_backward_input_opencl() {
+    test_conv2d_backward_input(OpenclXpu::new(0, None));
+}*/
 fn test_conv2d_backward_weight_bias_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     outputs: usize,

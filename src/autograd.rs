@@ -6,12 +6,17 @@ use crate::{
 use ndarray::{Dimension, IntoDimension, Ix0, Ix1, Ix2, Ix3, Ix4, IxDyn, RemoveAxis};
 use num_traits::ToPrimitive;
 use std::sync::{Arc, LockResult, Mutex, PoisonError, Weak};
+#[cfg(feature = "opencl")]
+use std::sync::atomic::{Ordering::SeqCst, AtomicBool};
 
 /// Wrapper around a RwTensor\
 /// Gradient lazily allocates its tensor with zeros, to minimize memory footprint. If the backward pass is never called, then no allocation is needed.
 #[derive(Clone)]
 pub struct Gradient<D: Dimension> {
     tensor: RwTensor<f32, D>,
+    // Opencl doesn't allow 0 sized buffers, so this ugly workaround is required
+    #[cfg(feature = "opencl")]
+    is_initialized: Arc<AtomicBool>
 }
 
 pub type Gradient0 = Gradient<Ix0>;
@@ -25,15 +30,29 @@ impl<D: Dimension> Gradient<D> {
     fn new(device: &Device, shape: impl IntoDimension<Dim = D>) -> Self {
         let device = device.clone();
         let dim = shape.into_dimension();
-        let buffer = unsafe { Buffer::uninitialized(&device, 0) };
+        #[cfg(feature = "opencl")]
+        let len = if device.opencl().is_some() { 1 } else { 0 };
+        #[cfg(not(feature = "opencl"))]
+        let len = 0; 
+        let buffer = unsafe { Buffer::uninitialized(&device, len) };
         let data = RwRepr::from_buffer(buffer);
         let tensor = RwTensor { device, dim, data };
-        Self { tensor }
+        Self {
+            tensor,
+            #[cfg(feature = "opencl")]
+            is_initialized: Arc::new(AtomicBool::from(false))
+        }
     }
     /// Similar to RwTensor::read(), this method returns an optional LockResult<RwReadTensor>.\
     /// Some: If write has been called, returns the result for locking the RwLock\
     /// None: If write has not been called, returns None (the tensor has no data).
     pub fn read(&self) -> Option<LockResult<RwReadTensor<f32, D>>> {
+        #[cfg(feature = "opencl")] 
+        if self.tensor.device.opencl().is_some() {
+            if !self.is_initialized.load(SeqCst) {
+                return None;
+            }
+        }
         match self.tensor.read() {
             Ok(x) => {
                 if x.data.buffer.len() != 0 {
@@ -56,13 +75,21 @@ impl<D: Dimension> Gradient<D> {
     /// Ok: If the RwLock has not been poisoned\
     /// Err: Returns the PoisonError
     pub fn write(&self) -> LockResult<RwWriteTensor<f32, D>> {
-        self.tensor
-            .write()
+        self.tensor.write()
             .map(|mut x| {
                 if x.data.buffer.len() == 0 {
                     let device = &x.device;
                     let len = x.dim.size();
                     *x.data.buffer = Buffer::zeros(device, len);
+                }
+                else {
+                    #[cfg(feature = "opencl")]
+                    if !self.is_initialized.load(SeqCst) {
+                        let device = &x.device;
+                        let len = x.dim.size();
+                        *x.data.buffer = Buffer::zeros(device, len);
+                        self.is_initialized.store(true, SeqCst);
+                    }
                 }
                 x
             })
@@ -73,27 +100,48 @@ impl<D: Dimension> Gradient<D> {
                     let len = x.dim.size();
                     *x.data.buffer = Buffer::zeros(device, len);
                 }
+                else {
+                    #[cfg(feature = "opencl")]
+                    if !self.is_initialized.load(SeqCst) {
+                        let device = &x.device;
+                        let len = x.dim.size();
+                        *x.data.buffer = Buffer::zeros(device, len);
+                        self.is_initialized.store(true, SeqCst);
+                    }
+                }
                 PoisonError::new(x)
             })
     }
     fn into_dyn(self) -> Gradient<IxDyn> {
         Gradient {
             tensor: self.tensor.into_dyn(),
+            #[cfg(feature = "opencl")]
+            is_initialized: self.is_initialized.clone()
         }
     }
     fn into_dimensionality<D2: Dimension>(self) -> Option<Gradient<D2>> {
         self.tensor
             .clone()
             .into_dimensionality()
-            .map(|tensor| Gradient { tensor })
+            .map(|tensor| Gradient { 
+                tensor,
+                #[cfg(feature = "opencl")]
+                is_initialized: self.is_initialized.clone() 
+            })
     }
     fn into_shape<D2: Dimension>(
         self,
         shape: impl IntoDimension<Dim = D2>,
     ) -> Option<Gradient<D2>> {
+        #[cfg(feature = "opencl")]
+        let is_initialized = self.is_initialized;
         self.tensor
             .into_shape(shape)
-            .map(|tensor| Gradient { tensor })
+            .map(|tensor| Gradient { 
+                tensor,
+                #[cfg(feature = "opencl")]
+                is_initialized
+            })
     }
 }
 

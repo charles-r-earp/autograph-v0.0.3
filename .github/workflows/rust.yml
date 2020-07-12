@@ -32,6 +32,30 @@ jobs:
       run: cargo run --example mnist_dense -vv --features datasets -- --epochs 1
     - name: Run MNIST Lenet5 Example
       run: cargo run --example mnist_lenet5 -vv --features datasets -- --epochs 1
+  build_opencl:
+    runs-on: ${{ matrix.os }} 
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+    - uses: actions/checkout@v2
+      with: 
+        submodules: recursive
+    - name: Install OpenCL
+      run: sudo apt install ocl-icd-opencl-dev pocl-opencl-icd
+    - name: Check
+      run: cargo check -vv --features "datasets opencl"
+    - name: Check Bins
+      run: cargo check --bins -vv --features "datasets opencl"
+    - name: Build
+      run: cargo build -vv --features "datasets opencl"
+    - name: Build Bins
+      run: cargo build --bins -vv --features "datasets opencl"
+    - name: Run tests
+      run: cargo test --tests -vv --features opencl
+    - name: Run MNIST Dense Example
+      run: cargo run --example mnist_dense -vv --features "datasets opencl" -- --epochs 1
   benchmark:
     runs-on: ubuntu-latest
     steps:

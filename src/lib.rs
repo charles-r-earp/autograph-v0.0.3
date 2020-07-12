@@ -11,6 +11,8 @@ use rand::Rng;
 use rand_distr::Distribution;
 #[cfg(feature = "cuda")]
 use rustacuda::memory::{DeviceCopy, DeviceSlice};
+#[cfg(feature = "opencl")]
+use ocl::{OclPrm, Buffer as OclBuffer};
 use std::borrow::Cow;
 use std::sync::{Arc, LockResult, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -26,6 +28,14 @@ pub mod cuda;
 use cuda::CudaBuffer;
 #[cfg(feature = "cuda")]
 pub use cuda::CudaGpu;
+
+#[doc(hidden)]
+#[cfg(feature = "opencl")]
+pub mod opencl;
+#[cfg(feature = "opencl")]
+use opencl::OpenclBuffer;
+#[cfg(feature = "opencl")]
+pub use opencl::OpenclXpu;
 
 pub mod autograd;
 
@@ -54,9 +64,16 @@ pub trait DeviceCopy {}
 #[cfg(not(feature = "cuda"))]
 impl<T: PrivateNum> DeviceCopy for T {}
 
+#[doc(hidden)]
+#[cfg(not(feature = "opencl"))]
+pub trait OclPrm {}
+
+#[cfg(not(feature = "opencl"))]
+impl<T: PrivateNum> OclPrm  for T {}
+
 /// Num is a trait for all data types that Tensor can store, it cannot be implemented for additional types
 pub trait Num:
-    'static + Copy + DeviceCopy + Default + Zero + One + ToPrimitive + Bounded + PartialEq
+    'static + Copy + DeviceCopy + OclPrm + Default + Zero + One + ToPrimitive + Bounded + PartialEq
 {
 }
 
@@ -69,11 +86,14 @@ pub trait Unsigned: Num {}
 impl Unsigned for u8 {}
 
 #[doc(hidden)]
+#[non_exhaustive]
 #[derive(Clone)]
 pub enum Buffer<T: Num> {
     Cpu(CpuBuffer<T>),
     #[cfg(feature = "cuda")]
     Cuda(CudaBuffer<T>),
+    #[cfg(feature = "opencl")]
+    Opencl(OpenclBuffer<T>)
 }
 
 impl<T: Num> From<CpuBuffer<T>> for Buffer<T> {
@@ -89,12 +109,21 @@ impl<T: Num> From<CudaBuffer<T>> for Buffer<T> {
     }
 }
 
+#[cfg(feature = "opencl")]
+impl<T: Num> From<OpenclBuffer<T>> for Buffer<T> {
+    fn from(opencl_buffer: OpenclBuffer<T>) -> Self {
+        Buffer::Opencl(opencl_buffer)
+    }
+}
+
 impl<T: Num> Buffer<T> {
     unsafe fn uninitialized(device: &Device, len: usize) -> Self {
         match device {
             Device::Cpu(_) => CpuBuffer::uninitialized(len).into(),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => CudaBuffer::uninitialized(cuda_gpu, len).into(),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_gpu) => OpenclBuffer::uninitialized(opencl_gpu, len).into()
         }
     }
     fn from_vec<'a>(device: &Device, vec: impl Into<Cow<'a, [T]>>) -> Self {
@@ -107,6 +136,8 @@ impl<T: Num> Buffer<T> {
                 buffer.copy_from_slice(slice);
                 buffer.into()
             }
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_gpu) => OpenclBuffer::from_vec(opencl_gpu, vec).into()
         }
     }
     fn zeros(device: &Device, len: usize) -> Self {
@@ -118,6 +149,8 @@ impl<T: Num> Buffer<T> {
                 buffer.fill(T::zero());
                 buffer.into()
             }
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_gpu) => OpenclBuffer::from_elem(opencl_gpu, T::zero(), len).into()
         }
     }
     fn len(&self) -> usize {
@@ -125,6 +158,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.len(),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.len(),
+            #[cfg(feature = "opencl")]
+            Buffer::Opencl(opencl_buffer) => opencl_buffer.len()
         }
     }
     fn fill(&mut self, elem: T) {
@@ -132,6 +167,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.fill(elem),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.fill(elem),
+            #[cfg(feature = "opencl")]
+            Buffer::Opencl(opencl_buffer) => opencl_buffer.fill(elem) 
         }
     }
     fn as_slice(&self) -> Cow<[T]> {
@@ -139,6 +176,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.as_slice().into(),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.to_vec().into(),
+            #[cfg(feature = "opencl")]
+            Buffer::Opencl(opencl_buffer) => opencl_buffer.to_vec().into()
         }
     }
     fn cpu(&self) -> Option<&CpuBuffer<T>> {
@@ -167,6 +206,20 @@ impl<T: Num> Buffer<T> {
             _ => None,
         }
     }
+    #[cfg(feature = "opencl")]
+    fn opencl(&self) -> Option<&OpenclBuffer<T>> {
+        match self {
+            Buffer::Opencl(opencl_buffer) => Some(opencl_buffer),
+            _ => None,
+        }
+    }
+    #[cfg(feature = "opencl")]
+    fn opencl_mut(&mut self) -> Option<&mut OpenclBuffer<T>> {
+        match self {
+            Buffer::Opencl(opencl_buffer) => Some(opencl_buffer),
+            _ => None,
+        }
+    }
 }
 
 /// Device is an enum that is used to select whether to store and execute operations on the cpu or a gpu.\
@@ -177,10 +230,13 @@ impl<T: Num> Buffer<T> {
 /// ```
 /// Device can be cloned, which copies the pointer. Each Tensor will have a copy of the Device so that it can execute operations.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Device {
     Cpu(Arc<Cpu>),
     #[cfg(feature = "cuda")]
     Cuda(Arc<CudaGpu>),
+    #[cfg(feature = "opencl")]
+    Opencl(Arc<OpenclXpu>)
 }
 
 impl Device {
@@ -197,11 +253,22 @@ impl Device {
             _ => None,
         }
     }
-    /// For cpu does nothing. For cuda, blocks until all operations on the device are finished. Only necessary for timing ie for benchmarks. Any tranfers back to the cpu will implicitly synchronize.
+    #[cfg(feature = "opencl")] 
+    fn opencl(&self) -> Option<&Arc<OpenclXpu>> {
+        match self {
+            Device::Opencl(opencl_xpu) => Some(opencl_xpu),
+            _ => None
+        }
+    }
+    /// For cpu does nothing. For cuda and opencl, blocks until all operations on the device are finished. Only necessary for timing ie for benchmarks. Any tranfers back to the cpu will implicitly synchronize.
     pub fn synchronize(&self) {
         #[cfg(feature = "cuda")]
         {
             self.cuda().map(|gpu| gpu.synchronize());
+        }
+        #[cfg(feature = "opencl")]
+        {
+            self.opencl().map(|gpu| gpu.synchronize());
         }
     }
 }
@@ -219,6 +286,25 @@ impl From<Arc<CudaGpu>> for Device {
     }
 }
 
+#[cfg(feature = "opencl")]
+impl From<Arc<OpenclXpu>> for Device {
+    fn from(opencl_xpu: Arc<OpenclXpu>) -> Self {
+        Device::Opencl(opencl_xpu)
+    }
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        #[cfg(feature = "cuda")] {
+            return CudaGpu::new(0).into()
+        }
+        #[cfg(feature = "opencl")] {
+            return OpenclXpu::new(0, None).into()
+        }
+        Cpu::new().into()
+    }
+}
+
 impl PartialEq for Device {
     fn eq(&self, other: &Self) -> bool {
         match self {
@@ -231,6 +317,11 @@ impl PartialEq for Device {
                 Device::Cuda(cuda_gpu2) => Arc::ptr_eq(cuda_gpu1, cuda_gpu2),
                 _ => false,
             },
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_gpu1) => match other {
+                Device::Opencl(opencl_gpu2) => Arc::ptr_eq(opencl_gpu1, opencl_gpu2),
+                _ => false
+            }
         }
     }
 }
@@ -656,6 +747,12 @@ impl<T: Num, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
     fn as_cuda_ptr(&self) -> Option<*const T> {
         self.data.buffer().cuda().map(|b| b.as_ptr())
     }
+    #[cfg(feature = "opencl")]
+    fn as_ocl_buffer(&self) -> Option<OclBuffer<T>> {
+        self.data.buffer()
+            .opencl()
+            .map(|b| b.as_ocl_buffer())
+    }
 }
 
 impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
@@ -666,6 +763,8 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::reduce_sum(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::reduce_sum(self, &mut output),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_xpu) => opencl::reduce_sum(self, &mut output)
         }
         output
     }
@@ -676,6 +775,8 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::relu(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::relu(self, &mut output),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_xpu) => opencl::relu(self, &mut output)
         }
         output
     }
@@ -690,6 +791,8 @@ impl<S: DataMut<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::scaled_add(self, alpha, rhs),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::scaled_add(self, alpha, rhs),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_xpu) => opencl::scaled_add(self, alpha, rhs)
         }
     }
 }
@@ -705,6 +808,8 @@ impl<T: Unsigned, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::unsigned_to_f32(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_f32(self, &mut output),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_gpu) => opencl::unsigned_to_f32(self, &mut output)
         }
         output
     }
@@ -719,6 +824,8 @@ impl<T: Unsigned, S: DataRef<Elem = T>> TensorBase<S, Ix1> {
             Device::Cpu(cpu) => cpu::unsigned_to_one_hot_f32(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_one_hot_f32(self, &mut output),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(opencl_gpu) => opencl::unsigned_to_one_hot_f32(self, &mut output)
         }
         output
     }
@@ -755,6 +862,12 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
             .cuda_mut()
             .map(|mut b| b.as_mut_ptr())
     }
+    #[cfg(feature = "opencl")]
+    fn as_mut_ocl_buffer(&mut self) -> Option<OclBuffer<T>> {
+        self.data.buffer_mut()
+            .opencl_mut()
+            .map(|b| b.as_mut_ocl_buffer())
+    }
     /// Fills the tensor with the provided elem.  
     pub fn fill(&mut self, elem: T) {
         self.data.buffer_mut().fill(elem);
@@ -776,6 +889,14 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
                     .take(cuda_buffer.len())
                     .collect();
                 cuda_buffer.copy_from_slice(&vec);
+            }
+            #[cfg(feature = "opencl")]
+            Buffer::Opencl(opencl_buffer) => {
+                let vec: Vec<T> = distr
+                    .sample_iter(&mut rng)
+                    .take(opencl_buffer.len())
+                    .collect();
+                opencl_buffer.copy_from_slice(&vec);
             }
         }
     }
@@ -845,6 +966,8 @@ fn broadcast<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D: Dimension>
         Device::Cpu(cpu) => cpu::broadcast(input, output),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast(input, output),
+        #[cfg(feature = "opencl")]
+        Device::Opencl(opencl_gpu) => opencl::broadcast(input, output)
     }
 }
 
@@ -857,6 +980,8 @@ fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Dimen
         Device::Cpu(cpu) => cpu::broadcast_backward(input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast_backward(input_grad, output_grad),
+        #[cfg(feature = "opencl")]
+        Device::Opencl(opencl_gpu) => opencl::broadcast_backward(input_grad, output_grad)
     }
 }
 
@@ -878,6 +1003,8 @@ fn relu_backward<
         Device::Cpu(cpu) => cpu::relu_backward(input, input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::relu_backward(input, input_grad, output_grad),
+        /// TODO
+        _ => unimplemented!()
     }
 }
 
@@ -902,6 +1029,8 @@ fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32
         Device::Cpu(_) => cpu::gemm(alpha, a, trans_a, b, trans_b, beta, c),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::gemm(alpha, a, trans_a, b, trans_b, beta, c),
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => opencl::gemm(alpha, a, trans_a, b, trans_b, beta, c)
     }
 }
 
@@ -928,6 +1057,8 @@ fn cross_entropy_backward<
         Device::Cuda(cuda_gpu) => {
             cuda::cross_entropy_backward(input, input_grad, target, output_grad)
         }
+        #[cfg(feature = "opencl")]
+        Device::Opencl(opencl_xpu) => opencl::cross_entropy_backward(input, input_grad, target, output_grad)
     }
 }
 
@@ -970,9 +1101,11 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix2> {
         debug_assert_eq!(self.raw_dim(), target.raw_dim());
         let mut output = unsafe { Tensor::uninitialized(&self.device, self.raw_dim()) };
         match &self.device {
-            Device::Cpu(cpu) => cpu::cross_entropy(self, target, &mut output),
+            Device::Cpu(_) => cpu::cross_entropy(self, target, &mut output),
             #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_gpu) => cuda::cross_entropy(self, target, &mut output),
+            Device::Cuda(_) => cuda::cross_entropy(self, target, &mut output),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(_) => opencl::cross_entropy(self, target, &mut output)
         }
         output.sum()
     }
@@ -1129,6 +1262,8 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix4> {
             Device::Cpu(_) => cpu::conv2d(self, weight, bias, args, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => cuda::conv2d(self, weight, bias, args, &mut output),
+            #[cfg(feature = "opencl")]
+            Device::Opencl(_) => opencl::conv2d(self, weight, bias, args, &mut output)
         }
         output
     }
@@ -1162,6 +1297,8 @@ fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
         Device::Cpu(_) => cpu::conv2d_backward_input(input_grad, weight, args, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::conv2d_backward_input(input_grad, weight, args, output_grad),
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => unimplemented!() // opencl::conv2d_backward_input(input_grad, weight, args, output_grad)
     }
 }
 
@@ -1188,6 +1325,8 @@ fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
         Device::Cuda(_) => {
             cuda::conv2d_backward_weight_bias(input, weight_grad, bias_grad, args, output_grad)
         }
+        /// TODO
+        _ => unimplemented!()
     }
 }
 
@@ -1214,6 +1353,8 @@ fn max_pool2d_forward<S1: DataRef<Elem = f32>>(
             cuda::max_pool2d(input, args, &mut output);
             None
         }
+        /// TODO
+        _ => unimplemented!()
     };
     (output, workspace)
 }
@@ -1236,5 +1377,7 @@ fn max_pool2d_backward<
         Device::Cpu(_) => cpu::max_pool2d_backward(input, input_grad, args, workspace, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::max_pool2d_backward(input, input_grad, args, output_grad),
+        /// TODO
+        _ => unimplemented!()
     }
 }

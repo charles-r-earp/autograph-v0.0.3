@@ -12,6 +12,9 @@ categories = ["science"]
 readme = "README.md"
 
 [dependencies]
+onednn-sys = { git = "https://github.com/charles-r-earp/onednn-sys" }
+ocl = { version = "0.19.3", optional = true }
+clblast-sys = { git = "https://github.com/charles-r-earp/clblast-sys", optional = true }
 cpp = "0.5.4"
 rustacuda = { version = "0.1.2", optional = true }
 cuda-sys = { version = "0.2.0", optional = true }
@@ -26,6 +29,7 @@ rand = "0.7.3"
 rand_distr = "0.2.2"
 argmm = "0.1.0"
 
+
 [build-dependencies]
 cmake = "0.1.42"
 cpp_build = "0.5.4"
@@ -33,6 +37,7 @@ cc = "1.0.55"
 
 [features]
 datasets = ["byteorder", "flate2", "reqwest"]
+opencl = ["ocl", "clblast-sys"]
 cuda = ["rustacuda", "cuda-sys", "cuda-cudnn-sys"]
 
 [dev-dependencies]

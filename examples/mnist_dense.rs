@@ -3,8 +3,10 @@ use argparse::{ArgumentParser, Store, StoreTrue};
 use autograph::autograd::{Graph, Parameter, Variable};
 use autograph::datasets::Mnist; // requires feature "datasets"
 use autograph::utils::classification_accuracy;
-#[cfg(feature = "cuda")]
-use autograph::CudaGpu;
+//#[cfg(feature = "cuda")]
+//use autograph::CudaGpu;
+//#[cfg(feature = "opencl")]
+//use autograph::OpenclXpu;
 use autograph::{ArcTensor, Cpu, Device, RwTensor, Tensor};
 use num_traits::ToPrimitive;
 use rand::{rngs::SmallRng, SeedableRng};
@@ -13,12 +15,11 @@ use std::time::Instant;
 
 fn main() {
     // Use argparse to get command line arguments
-    let (epochs, lr, train_batch_size, eval_batch_size, no_cuda) = {
+    let (epochs, lr, train_batch_size, eval_batch_size) = {
         let mut epochs = 10;
         let mut lr = 0.001;
         let mut train_batch_size: usize = 100;
         let mut eval_batch_size: usize = 1000;
-        let mut no_cuda = false;
         {
             let mut ap = ArgumentParser::new();
             ap.set_description("MNIST Dense Example");
@@ -39,30 +40,24 @@ fn main() {
                 Store,
                 "Evaluation Batch Size",
             );
-            ap.refer(&mut no_cuda).add_option(
-                &["--no-cuda"],
-                StoreTrue,
-                "Uses cpu even if cuda feature is enabled.",
-            );
             ap.parse_args_or_exit();
         }
-        (epochs, lr, train_batch_size, eval_batch_size, no_cuda)
+        (epochs, lr, train_batch_size, eval_batch_size)
     };
 
     // Construct a device that will be used to create Tensors
-    let device = Device::from(Cpu::new());
-    #[cfg(feature = "cuda")]
-    let device = if no_cuda {
-        Device::from(Cpu::new())
-    } else {
-        Device::from(CudaGpu::new(0))
-    };
+    let device = Device::default();
+    // cpu  
+    // Device::from(Cpu::new()); 
+    // cuda
+    // Device::from(CudaGpu::new(0));
+    // opencl
+    // Device::from(Xpu::new(0, None)); // second argument is autograph::opencl::OclDeviceType ie ocl::flags::DeviceType
 
     println!("epochs: {}", epochs);
     println!("lr: {}", lr);
     println!("train_batch_size: {}", train_batch_size);
     println!("eval_batch_size: {}", eval_batch_size);
-    println!("no_cuda: {}", no_cuda);
     println!("device: {:?}", &device);
 
     // Construct a Random Number Generator to initialize our model.
