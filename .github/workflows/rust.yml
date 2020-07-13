@@ -27,7 +27,7 @@ jobs:
     - name: Build Bins
       run: cargo build --bins -vv --features datasets
     - name: Run tests
-      run: cargo test --tests -vv --no-fail-fast
+      run: cargo test --tests -vv
     - name: Run MNIST Dense Example
       run: cargo run --example mnist_dense -vv --features datasets -- --epochs 1
     - name: Run MNIST Lenet5 Example
@@ -54,7 +54,7 @@ jobs:
     - name: Build Bins
       run: cargo build --bins -vv --features "datasets opencl"
     - name: Run tests
-      run: cargo test --tests -vv -j1 --no-fail-fast --features opencl
+      run: cargo test --tests -vv --features opencl -- --test-threads=1
     - name: Run MNIST Dense Example
       run: cargo run --example mnist_dense -vv --features "datasets opencl" -- --epochs 1
   benchmark:
