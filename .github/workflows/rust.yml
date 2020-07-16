@@ -44,7 +44,7 @@ jobs:
         submodules: recursive
     - name: Install OpenCL for Ubuntu
       if: ${{ matrix.os == 'ubuntu-latest' }}
-      run: sudo apt install ocl-icd-opencl-dev pocl-opencl-icd
+      run: sudo apt update && sudo apt install ocl-icd-opencl-dev pocl-opencl-icd
     - name: Check
       run: cargo check -vv --features "datasets opencl"
     - name: Check Bins
