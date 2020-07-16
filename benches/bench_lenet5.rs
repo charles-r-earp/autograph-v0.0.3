@@ -3,6 +3,8 @@ use autograph::autograd::{Graph, ParameterD, Variable, Variable2, Variable4};
 use autograph::layer::{Conv2d, Dense, Forward, Layer};
 #[cfg(feature = "cuda")]
 use autograph::CudaGpu;
+#[cfg(feature = "opencl")]
+use autograph::OpenclXpu;
 use autograph::{ArcTensor, Cpu, Device, Pool2dArgs, Tensor, Tensor2, Tensor4, TensorView4};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ndarray::{Dimension, Ix2, Ix4};
@@ -243,6 +245,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     {
         let gpu = Device::from(CudaGpu::new(0));
         bench_autograph_lenet5(c, &gpu, 256);
+    }
+    #[cfg(feature = "opencl")]
+    {
+        let xpu = Device::from(OpenclXpu::new(0, None));
+        bench_autograph_lenet5(c, &xpu, 256);
     }
     bench_tch_lenet5(c, tch::Device::Cpu, 256);
 }

@@ -4,9 +4,7 @@ use autograph::autograd::{Graph, ParameterD, Variable, Variable2, Variable4};
 use autograph::datasets::Mnist; // requires feature "datasets"
 use autograph::layer::{Conv2d, Dense, Forward, Layer};
 use autograph::utils::classification_accuracy;
-#[cfg(feature = "cuda")]
-use autograph::CudaGpu;
-use autograph::{ArcTensor, Cpu, Device, Pool2dArgs, Tensor, Tensor2, Tensor4, TensorView4};
+use autograph::{ArcTensor, Device, Pool2dArgs, Tensor, Tensor2, Tensor4, TensorView4};
 use ndarray::{Dimension, Ix2, Ix4};
 use num_traits::ToPrimitive;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -113,12 +111,11 @@ impl Forward<Ix4> for Lenet5 {
 }
 
 fn main() {
-    let (epochs, lr, train_batch_size, eval_batch_size, no_cuda) = {
+    let (epochs, lr, train_batch_size, eval_batch_size) = {
         let mut epochs = 50;
         let mut lr = 0.001;
         let mut train_batch_size: usize = 256;
-        let mut eval_batch_size: usize = 1024;
-        let mut no_cuda = false;
+        let mut eval_batch_size: usize = 512; // bugged, must use smaller batch size 1024;
         {
             let mut ap = ArgumentParser::new();
             ap.set_description("MNIST Lenet5 Example");
@@ -130,7 +127,7 @@ fn main() {
             ap.refer(&mut lr)
                 .add_option(&["--learning-rate"], Store, "Learning Rate");
             ap.refer(&mut train_batch_size).add_option(
-                &["--train-batch_size"],
+                &["--train-batch-size"],
                 Store,
                 "Training Batch Size",
             );
@@ -139,30 +136,17 @@ fn main() {
                 Store,
                 "Evaluation Batch Size",
             );
-            ap.refer(&mut no_cuda).add_option(
-                &["--no-cuda"],
-                StoreTrue,
-                "Uses cpu even if cuda feature is enabled.",
-            );
             ap.parse_args_or_exit();
         }
-        (epochs, lr, train_batch_size, eval_batch_size, no_cuda)
+        (epochs, lr, train_batch_size, eval_batch_size)
     };
 
-    #[cfg(not(feature = "cuda"))]
-    let device = Device::from(Cpu::new());
-    #[cfg(feature = "cuda")]
-    let device = if no_cuda {
-        Device::from(Cpu::new())
-    } else {
-        Device::from(CudaGpu::new(0))
-    };
+    let device = Device::default();
 
     println!("epochs: {}", epochs);
     println!("lr: {}", lr);
     println!("train_batch_size: {}", train_batch_size);
     println!("eval_batch_size: {}", eval_batch_size);
-    println!("no_cuda: {}", no_cuda);
     println!("device: {:?}", &device);
 
     let mut rng = SmallRng::seed_from_u64(0);
@@ -197,6 +181,7 @@ fn main() {
             let y = model.forward(&x);
             let loss = y.cross_entropy_loss(&t);
             loss.backward(graph);
+            //println!("y: {:?} loss: {:?}", y.value().as_slice(), loss.value().as_slice());
             model.parameters().iter().for_each(|w| {
                 let mut w_value = w.value().write().unwrap();
                 let w_grad = w.grad().unwrap().read().unwrap().unwrap();
@@ -205,6 +190,7 @@ fn main() {
             train_correct += classification_accuracy(&y.value().as_array().view(), &t_arr);
             train_loss += loss.value().as_slice()[0];
         });
+        //panic!();
         train_loss /= 60_000f32;
         let train_acc = train_correct.to_f32().unwrap() * 100f32 / 60_000f32;
 

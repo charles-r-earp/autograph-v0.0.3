@@ -1003,8 +1003,8 @@ fn relu_backward<
         Device::Cpu(cpu) => cpu::relu_backward(input, input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::relu_backward(input, input_grad, output_grad),
-        /// TODO
-        _ => unimplemented!()
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => opencl::relu_backward(input, input_grad, output_grad)
     }
 }
 
@@ -1285,7 +1285,7 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix4> {
     }
 }
 
-fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
+pub fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     input_grad: &mut TensorBase<S1, Ix4>,
     weight: &TensorView4<f32>,
     args: &Conv2dArgs,
@@ -1298,11 +1298,11 @@ fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::conv2d_backward_input(input_grad, weight, args, output_grad),
         #[cfg(feature = "opencl")]
-        Device::Opencl(_) => unimplemented!() // opencl::conv2d_backward_input(input_grad, weight, args, output_grad)
+        Device::Opencl(_) => opencl::conv2d_backward_input(input_grad, weight, args, output_grad)
     }
 }
 
-fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
+pub fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
     input: &TensorBase<S1, Ix4>,
     weight_grad: &mut TensorViewMut4<f32>,
     bias_grad: Option<&mut TensorViewMut1<f32>>,
@@ -1325,12 +1325,14 @@ fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
         Device::Cuda(_) => {
             cuda::conv2d_backward_weight_bias(input, weight_grad, bias_grad, args, output_grad)
         }
-        /// TODO
-        _ => unimplemented!()
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => {
+            opencl::conv2d_backward_weight_bias(input, weight_grad, bias_grad, args, output_grad)
+        }
     }
 }
 
-fn max_pool2d_forward<S1: DataRef<Elem = f32>>(
+pub fn max_pool2d_forward<S1: DataRef<Elem = f32>>(
     input: &TensorBase<S1, Ix4>,
     args: &Pool2dArgs,
     train: bool,
@@ -1352,14 +1354,17 @@ fn max_pool2d_forward<S1: DataRef<Elem = f32>>(
         Device::Cuda(_) => {
             cuda::max_pool2d(input, args, &mut output);
             None
+        },
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => {
+            opencl::max_pool2d(input, args, &mut output);
+            None
         }
-        /// TODO
-        _ => unimplemented!()
     };
     (output, workspace)
 }
 
-fn max_pool2d_backward<
+pub fn max_pool2d_backward<
     S1: DataRef<Elem = f32>,
     S2: DataMut<Elem = f32>,
     S3: DataRef<Elem = f32>,
@@ -1377,7 +1382,9 @@ fn max_pool2d_backward<
         Device::Cpu(_) => cpu::max_pool2d_backward(input, input_grad, args, workspace, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::max_pool2d_backward(input, input_grad, args, output_grad),
-        /// TODO
-        _ => unimplemented!()
+        #[cfg(feature = "opencl")]
+        Device::Opencl(_) => {
+            opencl::max_pool2d_backward(input, input_grad, args, output_grad)
+        }
     }
 }

@@ -359,6 +359,32 @@ impl ConvolutionDescriptor {
             convolution_descriptor,
         }
     }
+    fn new_corr2d(args: &Conv2dArgs, data_type: cudnnDataType_t) -> Self {
+        let mut convolution_descriptor = unsafe { std::ptr::null_mut() };
+        let status = unsafe {
+            cudnnCreateConvolutionDescriptor(
+                &mut convolution_descriptor as *mut cudnnConvolutionDescriptor_t,
+            )
+        };
+        assert_eq!(status, cudnnStatus_t::CUDNN_STATUS_SUCCESS);
+        let status = unsafe {
+            cudnnSetConvolution2dDescriptor(
+                convolution_descriptor,
+                args.padding[0] as i32,
+                args.padding[1] as i32,
+                args.strides[0] as i32,
+                args.strides[1] as i32,
+                1, // dilation unused
+                1, //
+                cudnnConvolutionMode_t::CUDNN_CROSS_CORRELATION,
+                data_type,
+            )
+        };
+        assert_eq!(status, cudnnStatus_t::CUDNN_STATUS_SUCCESS);
+        Self {
+            convolution_descriptor,
+        }
+    }
     fn set_math_type(&mut self, math_type: cudnnMathType_t) {
         let status = unsafe { cudnnSetConvolutionMathType(self.convolution_descriptor, math_type) };
         assert_eq!(status, cudnnStatus_t::CUDNN_STATUS_SUCCESS);
@@ -879,20 +905,20 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     let cudnn_handle = unsafe { *cudnn_context as *mut cudnnContext };
     let x_desc = TensorDescriptor::new(input.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let x = input.as_cuda_ptr().unwrap();
-    let weight = {
+    /*let weight = {
         // Patch cudnn behavior by reversing filter order ie per patch
         // for kernel of shape (1, 1, 2, 2) and data = vec![1., 2., 3., 4.]
         // output = vec![4., 3., 2., 1.]
         let mut weight_reversed = unsafe { Tensor::uninitialized(&input.device, weight.raw_dim()) };
         reverse_conv2d_filter(&weight.view(), 0., &mut weight_reversed.view_mut());
         weight_reversed
-    };
+    };*/
     let w_desc = FilterDescriptor::new(weight.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let w = weight.as_cuda_ptr().unwrap();
     let y_desc = TensorDescriptor::new(output.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let y = output.as_mut_cuda_ptr().unwrap();
     let mut conv2d_desc =
-        ConvolutionDescriptor::new_conv2d(args, cudnnDataType_t::CUDNN_DATA_FLOAT);
+        ConvolutionDescriptor::new_corr2d(args, cudnnDataType_t::CUDNN_DATA_FLOAT);
     conv2d_desc.set_math_type(cudnnMathType_t::CUDNN_TENSOR_OP_MATH);
     let algo = if bias.is_some() {
         // required for identity activation in ConvolutionBiasActivationForward
@@ -1001,7 +1027,7 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     let cudnn_handle = unsafe { *cudnn_context as *mut cudnnContext };
     let dx_desc = TensorDescriptor::new(input_grad.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let dx = input_grad.as_mut_cuda_ptr().unwrap();
-    let weight = {
+    /*let weight = {
         // Patch cudnn behavior by reversing filter order ie per patch
         // for kernel of shape (1, 1, 2, 2) and data = vec![1., 2., 3., 4.]
         // output = vec![4., 3., 2., 1.]
@@ -1009,13 +1035,13 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
             unsafe { Tensor::uninitialized(&weight.device, weight.raw_dim()) };
         reverse_conv2d_filter(&weight.view(), 0., &mut weight_reversed.view_mut());
         weight_reversed
-    };
+    };*/
     let w_desc = FilterDescriptor::new(weight.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let w = weight.as_cuda_ptr().unwrap();
     let dy_desc = TensorDescriptor::new(output_grad.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let dy = output_grad.as_cuda_ptr().unwrap();
     let mut conv2d_desc =
-        ConvolutionDescriptor::new_conv2d(args, cudnnDataType_t::CUDNN_DATA_FLOAT);
+        ConvolutionDescriptor::new_corr2d(args, cudnnDataType_t::CUDNN_DATA_FLOAT);
     conv2d_desc.set_math_type(cudnnMathType_t::CUDNN_TENSOR_OP_MATH);
 
     let algo = {
@@ -1094,6 +1120,7 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
     let mut weight_grad_reversed = Tensor::zeros(weight_grad.device(), weight_grad.raw_dim());
     let dw_desc = FilterDescriptor::new(weight_grad.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let dw = weight_grad_reversed.as_mut_cuda_ptr().unwrap();
+    //let dw = weight_grad.as_mut_cuda_ptr().unwrap();
     let dy_desc = TensorDescriptor::new(output_grad.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let dy = output_grad.as_cuda_ptr().unwrap();
     let mut conv2d_desc =

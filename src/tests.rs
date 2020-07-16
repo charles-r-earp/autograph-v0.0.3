@@ -315,36 +315,45 @@ fn test_relu_cpu() {
 fn test_relu_cuda() {
     test_relu(CudaGpu::new(0));
 }
-#[cfg(feature = "cuda")]
+#[cfg(feature = "opencl")]
 #[test]
 fn test_relu_opencl() {
     test_relu(OpenclXpu::new(0, None));
 }
 fn test_relu_backward(device: impl Into<Device>) {
     let device = device.into();
-    let x = Tensor::from_shape_vec(&device, 6, vec![-0.1, -100., 0.0, 0.1, 1., 100.]);
-    let mut dx = Tensor1::<f32>::ones(&device, 6);
-    let dy = Tensor::from_shape_vec(&device, 6, vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6]);
+    let raw_x_vec = vec![-0.1, -100., 0.0, 0.1, 1., 100.];
+    let raw_dx_vec = vec![0.; 6];
+    let raw_dy_vec = vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6];
+    let x = Tensor::from_shape_vec(&device, 6, raw_x_vec.as_slice());
+    let mut dx = Tensor::from_shape_vec(&device, 6, raw_dx_vec.as_slice());
+    let dy = Tensor::from_shape_vec(&device, 6, raw_dy_vec.as_slice());
+    relu_backward(&x, &mut dx, &dy);
     let dx_vec = dx.as_slice().into_owned();
-    let mut dx_vec_true = vec![0.; dx_vec.len()];
-    x.as_slice()
-        .iter()
+    let mut dx_vec_true = raw_dx_vec.clone();
+    raw_x_vec.iter()
         .zip(dx_vec_true.iter_mut())
-        .zip(dy.as_slice().iter())
+        .zip(raw_dy_vec.iter())
         .for_each(|((&x, dx), &dy)| {
-            if x >= 0. {
+            if x > 0. {
                 *dx += dy;
             }
         });
-    debug_assert_eq!(dx_vec, vec![0., 0., 0., 0.1, 1., 100.]);
+    debug_assert_eq!(dx_vec, dx_vec_true);
 }
 #[test]
-fn test_relu_backard_cpu() {
-    test_relu(Cpu::new());
+fn test_relu_backward_cpu() {
+    test_relu_backward(Cpu::new());
 }
 #[cfg(feature = "cuda")]
+#[test]
 fn test_relu_backward_cuda() {
-    test_relu(CudaGpu::new(0));
+    test_relu_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_relu_backward_opencl() {
+    test_relu_backward(OpenclXpu::new(0, None));
 }
 fn test_scaled_add(device: impl Into<Device>) {
     let device = device.into();
@@ -646,7 +655,7 @@ fn test_conv2d_backward_input_with_args(
     let weight_dim = [outputs, inputs, kh, kw].into_dimension();
     let weight_vec: Vec<f32> = (1..=weight_dim.size())
         .into_iter()
-        .map(|x| x.to_f32().unwrap())
+        .map(|x| 1./* x.to_f32().unwrap()*/)
         .collect();
     let output_dim = [batch_size, outputs, oh, ow].into_dimension();
     let output_grad_vec: Vec<f32> = (1..=output_dim.size())
@@ -671,13 +680,14 @@ fn test_conv2d_backward_input_with_args(
         let input_grad_vec = input_grad.as_slice().into_owned();
         input_grad_vec
     };
-    compare_vectors(
+    /*compare_vectors(
         &input_grad_vec,
         &input_grad_true_vec,
         batch_size,
         outputs,
         inputs,
-    );
+    );*/
+    
     assert!(
         approx::relative_eq!(
             &*input_grad_vec,
@@ -685,8 +695,8 @@ fn test_conv2d_backward_input_with_args(
             max_relative = 0.001
         ),
         "\n{:?}\n !=\n{:?}",
-        &input_grad_vec,
-        &input_grad_true_vec
+        Array::from_shape_vec([batch_size, inputs, ih, iw], input_grad_vec),
+        Array::from_shape_vec([batch_size, inputs, ih, iw], input_grad_true_vec)
     );
 }
 fn test_conv2d_backward_input(device: impl Into<Device>) {
@@ -698,6 +708,13 @@ fn test_conv2d_backward_input(device: impl Into<Device>) {
         &Conv2dArgs::default(),
         device.clone(),
     );
+    /*test_conv2d_backward_input_with_args(
+        [1, 1, 8, 8],
+        1,
+        [5, 5],
+        &Conv2dArgs::default(),
+        device.clone(),
+    );*/
     test_conv2d_backward_input_with_args(
         [40, 1, 28, 28],
         6,
@@ -722,11 +739,11 @@ fn test_conv2d_backward_input_cpu() {
 fn test_conv2d_backward_input_cuda() {
     test_conv2d_backward_input(CudaGpu::new(0));
 }
-/*#[cfg(feature = "opencl")]
+#[cfg(feature = "opencl")]
 #[test]
 fn test_conv2d_backward_input_opencl() {
     test_conv2d_backward_input(OpenclXpu::new(0, None));
-}*/
+}
 fn test_conv2d_backward_weight_bias_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     outputs: usize,
@@ -861,6 +878,11 @@ fn test_conv2d_backward_weight_bias(device: impl Into<Device>) {
 fn test_conv2d_backward_weight_bias_cuda() {
     test_conv2d_backward_weight_bias(CudaGpu::new(0));
 }
+#[cfg(feature = "opencl")]
+#[test]
+fn test_conv2d_backward_weight_bias_opencl() {
+    test_conv2d_backward_weight_bias(OpenclXpu::new(0, None));
+}
 fn test_max_pool2d_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     args: &Pool2dArgs,
@@ -912,6 +934,11 @@ fn test_max_pool2d_cpu() {
 #[test]
 fn test_max_pool2d_cuda() {
     test_max_pool2d(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_max_pool2d_opencl() {
+    test_max_pool2d(OpenclXpu::new(0, None));
 }
 fn test_max_pool2d_backward_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
@@ -976,6 +1003,11 @@ fn test_max_pool2d_backward_cpu() {
   test_max_pool2d(Cpu::new());
 }*/
 #[cfg(feature = "cuda")]
-fn test_max_pool_backward_cuda() {
+fn test_max_pool2d_backward_cuda() {
     test_max_pool2d_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "opencl")]
+#[test]
+fn test_max_pool2d_backward_opencl() {
+    test_max_pool2d_backward(OpenclXpu::new(0, None));
 }

@@ -8,7 +8,7 @@ pub use ocl::flags::DeviceType as OclDeviceType;
 use clblast_sys::{
     cl_mem, cl_command_queue, 
     CLBlastStatusCode::CLBlastSuccess, 
-    CLBlastSgemm, CLBlastSsum, CLBlastSaxpy, CLBlastSaxpyBatched, CLBlastSconvgemm, 
+    CLBlastSgemm, CLBlastSsum, CLBlastSaxpy, CLBlastSaxpyBatched, CLBlastSconvgemm, CLBlastSim2col, CLBlastScol2im, 
     CLBlastLayout::*, CLBlastTranspose, CLBlastTranspose::*,
     CLBlastKernelMode::*
 };
@@ -598,7 +598,40 @@ pub(super) fn relu<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Dimensio
         .global_work_size(nblocks * nthreads)
         .arg(&x)
         .arg(&y)
-        .arg(len)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap()
+    }
+}
+
+pub(super) fn relu_backward<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, S3: DataRef<Elem = f32>, D: Dimension>(
+    input: &TensorBase<S1, D>,
+    input_grad: &mut TensorBase<S2, D>,
+    output_grad: &TensorBase<S3, D>,
+) {
+    let xpu = input.device.opencl().unwrap();
+    let x = input.as_ocl_buffer().unwrap();
+    let dx = input_grad.as_mut_ocl_buffer().unwrap();
+    let dy = output_grad.as_ocl_buffer().unwrap();
+    let len = x.len();
+    
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let kernel = Kernel::builder()
+        .name("relu_backward")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .arg(&x)
+        .arg(&dx)
+        .arg(&dy)
+        .arg(len as u32)
         .build()
         .unwrap();
     unsafe {
@@ -653,18 +686,17 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     let [ph, pw] = args.padding;
     let [dh, dw] = [1, 1];
     
-    let weight = {
+    /*let weight = {
         // reverse kernel to get correct results
         let mut weight_reversed = unsafe { Tensor::<f32, _>::uninitialized(&weight.device, weight.raw_dim()) };
         let beta = 0f32;
-        let filter_len = (kh * kw) as u32;
+        let filter_len = kh * kw;
         let len = weight.len();
         let nthreads = 64;
         let mut nblocks = len / nthreads;
         if len < nthreads || len % nthreads != 0 {
             nblocks += 1;
         }
-        let len = len as u32;
         
         let w = weight.as_ocl_buffer().unwrap();
         let w_rev = weight_reversed.as_mut_ocl_buffer().unwrap();
@@ -678,15 +710,15 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
             .arg(&w)
             .arg(0f32)
             .arg(&w_rev)
-            .arg(filter_len)
-            .arg(len)
+            .arg(filter_len as u32)
+            .arg(len as u32)
             .build()
             .unwrap();
         unsafe {
             kernel.enq().unwrap();
         }
         weight_reversed
-    };
+    };*/
     
     let x = input.as_ocl_buffer().unwrap();
     let w = weight.as_ocl_buffer().unwrap();
@@ -695,15 +727,14 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     if let Some(bias) = &bias {
         let b = bias.as_ocl_buffer().unwrap();
         
-        let nchannels = oc as u32;
-        let filter_len = (kh * kw) as u32;
+        let nchannels = oc;
+        let filter_len = kh * kw;
         let len = n * oc;
         let nthreads = 64;
         let mut nblocks = len / nthreads;
         if len < nthreads || len % nthreads != 0 {
             nblocks += 1;
         }
-        let len = len as u32;
         
         let kernel = Kernel::builder()
             .name("conv2d_broadcast_bias")
@@ -713,9 +744,9 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
             .local_work_size(nthreads)
             .arg(&b)
             .arg(&y)
-            .arg(nchannels)
-            .arg(filter_len)
-            .arg(len)
+            .arg(nchannels as u32)
+            .arg(filter_len as u32)
+            .arg(len as u32)
             .build()
             .unwrap();
         unsafe {
@@ -728,7 +759,8 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     
     let status = unsafe {
         CLBlastSconvgemm(
-            CLBlastKernelModeConvolution,
+            //CLBlastKernelModeConvolution,
+            CLBlastKernelModeCrossCorrelation,
             ic, ih, iw,
             kh, kw,
             ph, pw,
@@ -746,13 +778,129 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     assert_eq!(status, CLBlastSuccess);
 }
 
+/*
+fn nchw_to_nhwc<S1: DataRef<Elem=f32>, S2: DataMut<Elem=f32>>(input: &TensorBase<S1, Ix4>, output: &mut TensorBase<S2, Ix4>) {
+    let xpu = input.device().opencl().unwrap();
+    let (n, c, h, w) = input.dim();
+    debug_assert_eq!(output.dim(), (n, h, w, c));
+    
+    let len = n*c;
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let x = input.as_ocl_buffer().unwrap();
+    let y = output.as_mut_ocl_buffer().unwrap();
+    
+    let kernel = Kernel::builder()
+        .name("nchw_to_nhwc")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&x)
+        .arg(&y)
+        .arg(n as u32)
+        .arg(c as u32)
+        .arg(h as u32)
+        .arg(w as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap();
+    }
+}   
+
+fn nhwc_to_nchw<S1: DataRef<Elem=f32>, S2: DataMut<Elem=f32>>(input: &TensorBase<S1, Ix4>, beta: f32, output: &mut TensorBase<S2, Ix4>) {
+    let xpu = input.device().opencl().unwrap();
+    let (n, h, w, c) = input.dim();
+    debug_assert_eq!(output.dim(), (n, c, h, w));
+    
+    let len = n*c;
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let x = input.as_ocl_buffer().unwrap();
+    let y = output.as_mut_ocl_buffer().unwrap();
+    
+    let kernel = Kernel::builder()
+        .name("nhwc_to_nchw")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&x)
+        .arg(&y)
+        .arg(beta)
+        .arg(n as u32)
+        .arg(c as u32)
+        .arg(h as u32)
+        .arg(w as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap();
+    }
+}   
+
+fn ohwi_flipped_to_oihw<S1: DataRef<Elem=f32>, S2: DataMut<Elem=f32>>(input: &TensorBase<S1, Ix4>, beta: f32, output: &mut TensorBase<S2, Ix4>) {
+    let xpu = input.device().opencl().unwrap();
+    let (oc, kh, kw, ic) = input.dim();
+    debug_assert_eq!(output.dim(), (oc, ic, kh, kw));
+    
+    let len = oc*ic;
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let x = input.as_ocl_buffer().unwrap();
+    let y = output.as_mut_ocl_buffer().unwrap();
+    
+    let kernel = Kernel::builder()
+        .name("ohwi_flipped_to_oihw")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&x)
+        .arg(&y)
+        .arg(beta)
+        .arg(oc as u32)
+        .arg(ic as u32)
+        .arg(kh as u32)
+        .arg(kw as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap();
+    }
+}*/  
+
 pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     input_grad: &mut TensorBase<S1, Ix4>,
     weight: &TensorView4<f32>,
     args: &Conv2dArgs,
     output_grad: &TensorView4<f32>,
 ) {
-    let xpu = weight.device.opencl().unwrap();
+    //return;
+    // im2col
+    // input [n, ic, ih, iw]
+    // input_col [n, ic, oh, ow, kh, kw] => [n*ic*oh*ow, kh*kw] 
+    // weight [oc, ic, kh, kw] => [oc*ic, kh*kw]
+    // [n, ic*kh*kw, oh*ow] [ic*kh*kw, oc] => [n, oh*ow, oc]
+    // [oc, ic*kh*kw] [n, ic*kh*kw, oh*ow] => [n, oc, oh*ow] 
+    let device = weight.device();
+    let xpu = device.opencl().unwrap();
     
     let (n, ic, ih, iw) = input_grad.dim();
     let (_oc, _ic, kh, kw) = weight.dim();
@@ -760,66 +908,290 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     
     let [sh, sw] = args.strides;
     let [ph, pw] = args.padding;
-    let [dh, dw] = [1, 1];
-    
-    let weight = {
-        // reverse kernel to get correct results
-        let mut weight_reversed = unsafe { Tensor::<f32, _>::uninitialized(&weight.device, weight.raw_dim()) };
-        let beta = 0f32;
-        let filter_len = (kh * kw) as u32;
-        let len = weight.len();
-        let nthreads = 64;
-        let mut nblocks = len / nthreads;
-        if len < nthreads || len % nthreads != 0 {
-            nblocks += 1;
-        }
-        let len = len as u32;
-        
-        let w = weight.as_ocl_buffer().unwrap();
-        let w_rev = weight_reversed.as_mut_ocl_buffer().unwrap();
-        
-        let kernel = Kernel::builder()
-            .name("reverse_conv_filter")
-            .program(&xpu.program)
-            .queue(xpu.queue.clone())
-            .global_work_size(nblocks * nthreads)
-            .local_work_size(nthreads)
-            .arg(&w)
-            .arg(0f32)
-            .arg(&w_rev)
-            .arg(filter_len)
-            .arg(len)
-            .build()
-            .unwrap();
-        unsafe {
-            kernel.enq().unwrap();
-        }
-        weight_reversed
-    };
     
     let dx = input_grad.as_mut_ocl_buffer().unwrap();
     let w = weight.as_ocl_buffer().unwrap();
     let dy = output_grad.as_ocl_buffer().unwrap();
     
+    let mut dx_col = OclBuffer::<f32>::builder()
+        .queue(xpu.queue.clone())
+        .len(ic*kh*kw * oh*ow)
+        .build()
+        .unwrap();
+    let mut dx_tmp = OclBuffer::<f32>::builder()
+        .queue(xpu.queue.clone())
+        .len(n * ic * ih * iw)
+        .build()
+        .unwrap();
+    
     let mut command_queue = xpu.queue.as_ptr();
     let command_queue = unsafe { &mut command_queue as *mut *mut std::ffi::c_void };
     
-    let status = unsafe {
-        CLBlastSconvgemm(
-            CLBlastKernelModeCrossCorrelation,
-            ic, ih, iw,
-            kh, kw,
-            ph, pw,
-            sh, sw,
-            dh, dw,
-            oc, n,
-            dy.as_ptr() as cl_mem, 0,
-            w.as_ptr() as cl_mem, 0,
-            dx.as_ptr() as cl_mem, 0,
-            command_queue as *mut cl_command_queue,
-            std::ptr::null_mut()
-        )
-    };
+    (0 .. n).into_iter()
+        .for_each(|batch| {
+            { // dx_col = gemm wT * dy[n]
+                let alpha = 1.;
+                let beta = 0.;
+                let dy_offset = batch*oc*oh*ow;
+                let m = ic*kh*kw;
+                let k = oc;
+                let n = oh*ow;
+                let lda = m;
+                let ldb = n;
+                let ldc = n;
+                
+                let status = unsafe {
+                    CLBlastSgemm(
+                        CLBlastLayoutRowMajor,
+                        Transpose::Yes.into(),
+                        Transpose::No.into(),
+                        m, n, k,
+                        alpha,
+                        w.as_ptr() as cl_mem, 0, lda,
+                        dy.as_ptr() as cl_mem, dy_offset, ldb,
+                        beta,
+                        dx_col.as_ptr() as cl_mem, 0, ldc,
+                        command_queue as *mut cl_command_queue,
+                        std::ptr::null_mut()
+                    )
+                };
+                assert_eq!(status, CLBlastSuccess);
+            }
+            
+            { // dx += dx_col.col2im()
+                let dx_offset = batch*ic*ih*iw;
+                let status = unsafe {
+                    CLBlastScol2im(
+                        CLBlastKernelModeCrossCorrelation,
+                        ic, ih, iw,
+                        kh, kw,
+                        ph, pw,
+                        sh, sw,
+                        1, 1, // dilation unused
+                        dx_col.as_ptr() as cl_mem, 0,
+                        dx.as_ptr() as cl_mem, dx_offset,
+                        command_queue as *mut cl_command_queue,
+                        std::ptr::null_mut()
+                    )
+                };
+                assert_eq!(status, CLBlastSuccess); 
+            }
+            
+        });
+}
+
+pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
+    input: &TensorBase<S1, Ix4>,
+    weight_grad: &mut TensorViewMut4<f32>,
+    bias_grad: Option<&mut TensorViewMut1<f32>>,
+    args: &Conv2dArgs,
+    output_grad: &TensorView4<f32>,
+) {
+    // [n, oc, oh*ow] [n, (ic*kh*kw, oh*ow)T] => [oc, ic*kh*kw]
     
-    assert_eq!(status, CLBlastSuccess);
+    let device = input.device();
+    let xpu = device.opencl().unwrap();
+    
+    let (n, ic, ih, iw) = input.dim();
+    let (_oc, _ic, kh, kw) = weight_grad.dim();
+    let (_n, oc, oh, ow) = output_grad.dim();
+    
+    let [sh, sw] = args.strides;
+    let [ph, pw] = args.padding;
+    
+    let mut command_queue = xpu.queue.as_ptr();
+    let command_queue = unsafe { &mut command_queue as *mut *mut std::ffi::c_void };
+    
+    let x = input.as_ocl_buffer().unwrap();
+    let mut dw = weight_grad.as_mut_ocl_buffer().unwrap();
+    let dy = output_grad.as_ocl_buffer().unwrap();
+    
+    let mut x_col = OclBuffer::<f32>::builder()
+        .queue(xpu.queue.clone())
+        .len(ic*kh*kw * oh*ow)
+        .build()
+        .unwrap();
+    
+    (0 .. n).into_iter()
+        .for_each(|batch| {
+        { // x_col = x[n].im2col
+            let x_offset = batch*ic*ih*iw;
+            let status = unsafe {
+                CLBlastSim2col(
+                    CLBlastKernelModeCrossCorrelation,
+                    ic, ih, iw,
+                    kh, kw,
+                    ph, pw,
+                    sh, sw,
+                    1, 1, // dilation unused
+                    x.as_ptr() as cl_mem, x_offset,
+                    x_col.as_ptr() as cl_mem, 0,
+                    command_queue as *mut cl_command_queue,
+                    std::ptr::null_mut()
+                )
+            };
+            assert_eq!(status, CLBlastSuccess);
+        }
+        { // dw += gemm dy[n] * x_colT
+                let alpha = 1.;
+                let beta = 1.;
+                let dy_offset = batch*oc*oh*ow;
+                let m = oc;
+                let k = oh*ow;
+                let n = ic*kh*kw;
+                let lda = k;
+                let ldb = k;
+                let ldc = n;
+                
+                let status = unsafe {
+                    CLBlastSgemm(
+                        CLBlastLayoutRowMajor,
+                        Transpose::No.into(),
+                        Transpose::Yes.into(),
+                        m, n, k,
+                        alpha,
+                        dy.as_ptr() as cl_mem, dy_offset, lda,
+                        x_col.as_ptr() as cl_mem, 0, ldb,
+                        beta,
+                        dw.as_ptr() as cl_mem, 0, ldc,
+                        command_queue as *mut cl_command_queue,
+                        std::ptr::null_mut()
+                    )
+                };
+                assert_eq!(status, CLBlastSuccess);
+            }
+    });
+    
+    if let Some(bias_grad) = bias_grad {
+        let mut db = bias_grad.as_mut_ocl_buffer().unwrap();
+        
+        let nchannels = oc;
+        let filter_len = kh * kw;
+        let len = n * oc;
+        let nthreads = 64;
+        let mut nblocks = len / nthreads;
+        if len < nthreads || len % nthreads != 0 {
+            nblocks += 1;
+        }
+        
+        let kernel = Kernel::builder()
+            .name("conv2d_broadcast_bias_backward")
+            .program(&xpu.program)
+            .queue(xpu.queue.clone())
+            .global_work_size(nblocks * nthreads)
+            .local_work_size(nthreads)
+            .arg(&db)
+            .arg(&dy)
+            .arg(nchannels as u32)
+            .arg(filter_len as u32)
+            .arg(len as u32)
+            .build()
+            .unwrap();
+        unsafe {
+            kernel.enq().unwrap();
+        }
+    }
+}
+
+pub(super) fn max_pool2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
+    input: &TensorBase<S1, Ix4>,
+    args: &Pool2dArgs,
+    output: &mut TensorBase<S2, Ix4>,
+) {
+    let xpu = input.device.opencl().unwrap();
+    
+    let x = input.as_ocl_buffer().unwrap();
+    let y = output.as_ocl_buffer().unwrap();
+    
+    let (n, ic, ih, iw) = input.dim();
+    let (_n, oc, oh, ow) = output.dim();
+    
+    let [kh, kw] = args.kernel;
+    let [sh, sw] = args.strides;
+    let [ph, pw] = args.padding;
+    
+    let len = n * oc;
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let kernel = Kernel::builder()
+        .name("max_pool2d_forward")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&x)
+        .arg(&y)
+        .arg(ih as u32)
+        .arg(iw as u32)
+        .arg(oh as u32)
+        .arg(ow as u32)
+        .arg(kh as u32)
+        .arg(kw as u32)
+        .arg(sh as u32)
+        .arg(sw as u32)
+        .arg(ph as u32)
+        .arg(pw as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap();
+    }
+}
+
+pub(super) fn max_pool2d_backward<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, S3: DataRef<Elem = f32>>(
+    input: &TensorBase<S1, Ix4>,
+    input_grad: &mut TensorBase<S2, Ix4>,
+    args: &Pool2dArgs,
+    output_grad: &TensorBase<S3, Ix4>,
+) {
+    let xpu = input.device.opencl().unwrap();
+    
+    let x = input.as_ocl_buffer().unwrap();
+    let dx = input_grad.as_mut_ocl_buffer().unwrap();
+    let dy = output_grad.as_ocl_buffer().unwrap();
+    
+    let (n, ic, ih, iw) = input.dim();
+    let (_n, oc, oh, ow) = output_grad.dim();
+    
+    let [kh, kw] = args.kernel;
+    let [sh, sw] = args.strides;
+    let [ph, pw] = args.padding;
+    
+    let len = n * oc;
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let kernel = Kernel::builder()
+        .name("max_pool2d_backward")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&x)
+        .arg(&dx)
+        .arg(&dy)
+        .arg(ih as u32)
+        .arg(iw as u32)
+        .arg(oh as u32)
+        .arg(ow as u32)
+        .arg(kh as u32)
+        .arg(kw as u32)
+        .arg(sh as u32)
+        .arg(sw as u32)
+        .arg(ph as u32)
+        .arg(pw as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap();
+    }
 }
