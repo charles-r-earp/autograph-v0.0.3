@@ -86,24 +86,24 @@
     }
   }
   
-__kernel void conv2d_broadcast_bias(__global const float* b, __global float* y, unsigned int nchannels, unsigned int filter_len, unsigned int len) {
+__kernel void conv2d_broadcast_bias(__global const float* b, __global float* y, unsigned int nchannels, unsigned int image_len, unsigned int len) {
     size_t tid = get_global_id(0);
     if (tid < len) {
         size_t batch = tid / nchannels;
         size_t channel = tid % nchannels;
-        for(int i = 0; i < filter_len; ++i) {
-            y[batch*nchannels*filter_len + channel*filter_len + i] = b[channel];
+        for(int i = 0; i < image_len; ++i) {
+            y[batch*nchannels*image_len + channel*image_len + i] = b[channel];
         }
     }
 }
 
-__kernel void conv2d_broadcast_bias_backward(__global float* db, __global const float* dy, unsigned int nchannels, unsigned int filter_len, unsigned int len) {
+__kernel void conv2d_broadcast_bias_backward(__global float* db, __global const float* dy, unsigned int nchannels, unsigned int image_len, unsigned int len) {
     size_t tid = get_global_id(0);
     if (tid < len) {
         size_t batch = tid / nchannels;
         size_t channel = tid % nchannels;
-        for(int i = 0; i < filter_len; ++i) {
-            db[channel] += dy[batch*nchannels*filter_len + channel*filter_len + i];
+        for(int i = 0; i < image_len; ++i) {
+            db[channel] += dy[batch*nchannels*image_len + channel*image_len + i];
         }
     }
 }

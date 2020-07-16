@@ -8,7 +8,7 @@ pub use ocl::flags::DeviceType as OclDeviceType;
 use clblast_sys::{
     cl_mem, cl_command_queue, 
     CLBlastStatusCode::CLBlastSuccess, 
-    CLBlastSgemm, CLBlastSsum, CLBlastSaxpy, CLBlastSaxpyBatched, CLBlastSconvgemm, CLBlastSim2col, CLBlastScol2im, 
+    CLBlastSgemm, CLBlastSsum, CLBlastSaxpy, CLBlastSaxpyBatched, CLBlastSconvgemm, CLBlastSgemmBatched, CLBlastSim2col, CLBlastScol2im, 
     CLBlastLayout::*, CLBlastTranspose, CLBlastTranspose::*,
     CLBlastKernelMode::*
 };
@@ -728,7 +728,7 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
         let b = bias.as_ocl_buffer().unwrap();
         
         let nchannels = oc;
-        let filter_len = kh * kw;
+        let image_len = oh * ow;
         let len = n * oc;
         let nthreads = 64;
         let mut nblocks = len / nthreads;
@@ -745,7 +745,7 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
             .arg(&b)
             .arg(&y)
             .arg(nchannels as u32)
-            .arg(filter_len as u32)
+            .arg(image_len as u32)
             .arg(len as u32)
             .build()
             .unwrap();
@@ -913,71 +913,145 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     let w = weight.as_ocl_buffer().unwrap();
     let dy = output_grad.as_ocl_buffer().unwrap();
     
-    let mut dx_col = OclBuffer::<f32>::builder()
-        .queue(xpu.queue.clone())
-        .len(ic*kh*kw * oh*ow)
-        .build()
-        .unwrap();
-    let mut dx_tmp = OclBuffer::<f32>::builder()
-        .queue(xpu.queue.clone())
-        .len(n * ic * ih * iw)
-        .build()
-        .unwrap();
+    if cfg!(feature = "conv2d_bw_batched") {
+        let mut dx_col = OclBuffer::<f32>::builder()
+            .queue(xpu.queue.clone())
+            .len(n * ic*kh*kw * oh*ow)
+            .build()
+            .unwrap();
+
+        let mut command_queue = xpu.queue.as_ptr();
+        let command_queue = unsafe { &mut command_queue as *mut *mut std::ffi::c_void };
+        
+        { // dx_col = gemm wT * dy[n]
+            let batch_size = n;
+            let alphas = vec![1.; batch_size];
+            let betas = vec![0.; batch_size];
+            let dy_offsets: Vec<usize> = (0 .. batch_size)
+                .into_iter()
+                .map(|batch| batch*oc*oh*ow)
+                .collect();
+            let w_offsets = vec![0; batch_size];
+            let dx_col_offsets: Vec<usize> = (0 .. batch_size)
+                .into_iter()
+                .map(|batch| batch*ic*kh*kw*oh*ow)
+                .collect();
+            let m = ic*kh*kw;
+            let k = oc;
+            let n = oh*ow;
+            let lda = m;
+            let ldb = n;
+            let ldc = n;
+            
+            let status = unsafe {
+                CLBlastSgemmBatched(
+                    CLBlastLayoutRowMajor,
+                    Transpose::Yes.into(),
+                    Transpose::No.into(),
+                    m, n, k,
+                    alphas.as_ptr(),
+                    w.as_ptr() as cl_mem, w_offsets.as_ptr(), lda,
+                    dy.as_ptr() as cl_mem, dy_offsets.as_ptr(), ldb,
+                    betas.as_ptr(),
+                    dx_col.as_ptr() as cl_mem, dx_col_offsets.as_ptr(), ldc,
+                    batch_size,
+                    command_queue as *mut cl_command_queue,
+                    std::ptr::null_mut()
+                )
+            };
+            assert_eq!(status, CLBlastSuccess);
+        }
+        
+        { // dx += dx_col.col2im()
+            //let dx_offset = batch*ic*ih*iw;
+            let status = unsafe {
+                CLBlastScol2im(
+                    CLBlastKernelModeCrossCorrelation,
+                    ic, ih, iw,
+                    kh, kw,
+                    ph, pw,
+                    sh, sw,
+                    1, 1, // dilation unused
+                    dx_col.as_ptr() as cl_mem, 0,
+                    dx.as_ptr() as cl_mem, 0,
+                    command_queue as *mut cl_command_queue,
+                    std::ptr::null_mut()
+                )
+            };
+            assert_eq!(status, CLBlastSuccess); 
+        }
+    }
+    else {
     
-    let mut command_queue = xpu.queue.as_ptr();
-    let command_queue = unsafe { &mut command_queue as *mut *mut std::ffi::c_void };
-    
-    (0 .. n).into_iter()
-        .for_each(|batch| {
-            { // dx_col = gemm wT * dy[n]
-                let alpha = 1.;
-                let beta = 0.;
-                let dy_offset = batch*oc*oh*ow;
-                let m = ic*kh*kw;
-                let k = oc;
-                let n = oh*ow;
-                let lda = m;
-                let ldb = n;
-                let ldc = n;
+        let mut dx_col = OclBuffer::<f32>::builder()
+            .queue(xpu.queue.clone())
+            .len(ic*kh*kw * oh*ow)
+            .build()
+            .unwrap();
+        let mut dx_tmp = OclBuffer::<f32>::builder()
+            .queue(xpu.queue.clone())
+            .len(n * ic * ih * iw)
+            .build()
+            .unwrap();
+        
+        
+        let mut command_queue = xpu.queue.as_ptr();
+        let command_queue = unsafe { &mut command_queue as *mut *mut std::ffi::c_void };
+        
+        (0 .. n).into_iter()
+            .for_each(|batch| {
+                { // dx_col = gemm wT * dy[n]
+                    let alpha = 1.;
+                    let beta = 0.;
+                    let dy_offset = batch*oc*oh*ow;
+                    let m = ic*kh*kw;
+                    let k = oc;
+                    let n = oh*ow;
+                    let lda = m;
+                    let ldb = n;
+                    let ldc = n;
+                    
+                    let status = unsafe {
+                        CLBlastSgemm(
+                            CLBlastLayoutRowMajor,
+                            Transpose::Yes.into(),
+                            Transpose::No.into(),
+                            m, n, k,
+                            alpha,
+                            w.as_ptr() as cl_mem, 0, lda,
+                            dy.as_ptr() as cl_mem, dy_offset, ldb,
+                            beta,
+                            dx_col.as_ptr() as cl_mem, 0, ldc,
+                            command_queue as *mut cl_command_queue,
+                            std::ptr::null_mut()
+                        )
+                    };
+                    assert_eq!(status, CLBlastSuccess);
+                }
                 
-                let status = unsafe {
-                    CLBlastSgemm(
-                        CLBlastLayoutRowMajor,
-                        Transpose::Yes.into(),
-                        Transpose::No.into(),
-                        m, n, k,
-                        alpha,
-                        w.as_ptr() as cl_mem, 0, lda,
-                        dy.as_ptr() as cl_mem, dy_offset, ldb,
-                        beta,
-                        dx_col.as_ptr() as cl_mem, 0, ldc,
-                        command_queue as *mut cl_command_queue,
-                        std::ptr::null_mut()
-                    )
-                };
-                assert_eq!(status, CLBlastSuccess);
-            }
-            
-            { // dx += dx_col.col2im()
-                let dx_offset = batch*ic*ih*iw;
-                let status = unsafe {
-                    CLBlastScol2im(
-                        CLBlastKernelModeCrossCorrelation,
-                        ic, ih, iw,
-                        kh, kw,
-                        ph, pw,
-                        sh, sw,
-                        1, 1, // dilation unused
-                        dx_col.as_ptr() as cl_mem, 0,
-                        dx.as_ptr() as cl_mem, dx_offset,
-                        command_queue as *mut cl_command_queue,
-                        std::ptr::null_mut()
-                    )
-                };
-                assert_eq!(status, CLBlastSuccess); 
-            }
-            
-        });
+                { // dx += dx_col.col2im()
+                    let dx_offset = batch*ic*ih*iw;
+                    let status = unsafe {
+                        CLBlastScol2im(
+                            CLBlastKernelModeCrossCorrelation,
+                            ic, ih, iw,
+                            kh, kw,
+                            ph, pw,
+                            sh, sw,
+                            1, 1, // dilation unused
+                            dx_col.as_ptr() as cl_mem, 0,
+                            dx.as_ptr() as cl_mem, dx_offset,
+                            command_queue as *mut cl_command_queue,
+                            std::ptr::null_mut()
+                        )
+                    };
+                    assert_eq!(status, CLBlastSuccess); 
+                }
+                
+            });
+    }
+    
+    
 }
 
 pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
@@ -1066,7 +1140,7 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
         let mut db = bias_grad.as_mut_ocl_buffer().unwrap();
         
         let nchannels = oc;
-        let filter_len = kh * kw;
+        let image_len = oh * ow;
         let len = n * oc;
         let nthreads = 64;
         let mut nblocks = len / nthreads;
@@ -1083,7 +1157,7 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
             .arg(&db)
             .arg(&dy)
             .arg(nchannels as u32)
-            .arg(filter_len as u32)
+            .arg(image_len as u32)
             .arg(len as u32)
             .build()
             .unwrap();
