@@ -57,6 +57,8 @@ jobs:
       run: cargo test --tests -vv --features opencl -- --test-threads=1
     - name: Run MNIST Dense Example
       run: cargo run --example mnist_dense -vv --features "datasets opencl" -- --epochs 1
+    - name: Run MNIST Lenet5 Example
+      run: cargo run --example mnist_lenet5 -vv --features "datasets opencl" -- --epochs 1
   benchmark:
     runs-on: ubuntu-latest
     steps:
