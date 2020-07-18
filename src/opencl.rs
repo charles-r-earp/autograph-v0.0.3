@@ -1115,6 +1115,7 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
     let mut dw = weight_grad.as_mut_ocl_buffer().unwrap();
     let dy = output_grad.as_ocl_buffer().unwrap();
     
+    /*
     let mut x_col = OclBuffer::<f32>::builder()
         .queue(xpu.queue.clone())
         .len(ic*kh*kw * oh*ow)
@@ -1169,7 +1170,76 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
                 };
                 assert_eq!(status, CLBlastSuccess);
             }
-    });
+    }); 
+    */
+    
+    let mut x_col = OclBuffer::<f32>::builder()
+        .queue(xpu.queue.clone())
+        .len(n*ic*kh*kw * oh*ow)
+        .build()
+        .unwrap();
+    
+    (0 .. n).into_iter()
+        .for_each(|batch| {
+        { // x_col = x[n].im2col
+            let x_offset = batch*ic*ih*iw;
+            let x_col_offset = batch*ic*kh*kw*oh*ow;
+            let status = unsafe {
+                CLBlastSim2col(
+                    CLBlastKernelModeCrossCorrelation,
+                    ic, ih, iw,
+                    kh, kw,
+                    ph, pw,
+                    sh, sw,
+                    1, 1, // dilation unused
+                    x.as_ptr() as cl_mem, x_offset,
+                    x_col.as_ptr() as cl_mem, x_col_offset,
+                    command_queue as *mut cl_command_queue,
+                    std::ptr::null_mut()
+                )
+            };
+            assert_eq!(status, CLBlastSuccess);
+        }
+        
+    }); 
+    
+    { // dw += gemm dy[n] * x_col[n]T
+        let batch_size = n;
+        let alphas = vec![1.; batch_size];
+        let betas = vec![1.; batch_size];
+        let dy_offsets: Vec<usize> = (0 .. batch_size).into_iter()
+            .map(|batch| batch*oc*oh*ow)
+            .collect();
+        let x_col_offsets: Vec<usize> = (0 .. batch_size).into_iter()
+            .map(|batch| batch*oc*oh*ow)
+            .collect();
+        let dw_offsets = vec![0; batch_size];
+        let m = oc;
+        let k = oh*ow;
+        let n = ic*kh*kw;
+        let lda = k;
+        let ldb = k;
+        let ldc = n;
+        
+        let status = unsafe {
+            CLBlastSgemmBatched(
+                CLBlastLayoutRowMajor,
+                Transpose::No.into(),
+                Transpose::Yes.into(),
+                m, n, k,
+                alphas.as_ptr(),
+                dy.as_ptr() as cl_mem, dy_offsets.as_ptr(), lda,
+                x_col.as_ptr() as cl_mem, x_col_offsets.as_ptr(), ldb,
+                betas.as_ptr(),
+                dw.as_ptr() as cl_mem, dw_offsets.as_ptr(), ldc,
+                batch_size,
+                command_queue as *mut cl_command_queue,
+                std::ptr::null_mut()
+            )
+        };
+        assert_eq!(status, CLBlastSuccess);
+    }
+    
     
     if let Some(bias_grad) = bias_grad {
         let mut db = bias_grad.as_mut_ocl_buffer().unwrap();
