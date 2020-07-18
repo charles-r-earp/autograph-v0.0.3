@@ -14,10 +14,11 @@
     }
  } 
  
- __kernel void axpy_f32(const unsigned int n, const float alpha, __global const float *x, const unsigned int incx, __global float* y, const unsigned int incy) {
+ __kernel void axpy_f32(const unsigned int n, const float alpha, __global const float *x, const unsigned int offx, const unsigned int incx, 
+                                                                 __global float* y, const unsigned int offy, const unsigned int incy) {
     int tid = get_global_id(0);
     if (tid < n) {
-        y[tid*incy] += alpha * x[tid*incx];
+        y[tid] += alpha * x[tid];
     }
  }
  

@@ -649,6 +649,7 @@ pub(super) fn scaled_add<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Di
     let x = rhs.as_ocl_buffer().unwrap();
     let n = lhs.len();
     
+    /*
     let mut command_queue = xpu.queue.as_ptr();
     let command_queue = unsafe { &mut command_queue as *mut *mut std::ffi::c_void };
     
@@ -667,6 +668,37 @@ pub(super) fn scaled_add<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Di
         )
     };
     assert_eq!(status, CLBlastSuccess);
+    */
+    // naive custom opencl saxpy is faster (at least for n small), clblast xaxpy optimizes for specific multiples and may not be as efficient with arbitrary n
+    let len = n;
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    let incx = 1u32;
+    let incy = 1u32;
+    let offx = 0u32;
+    let offy = 0u32;
+    
+    let kernel = Kernel::builder()
+        .name("axpy_f32")
+        .program(&xpu.program)
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .arg(n as u32)
+        .arg(alpha)
+        .arg(&x)
+        .arg(offx)
+        .arg(incx)
+        .arg(&y)
+        .arg(offy)
+        .arg(incy)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq().unwrap()
+    }
 }
 
 pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
@@ -913,7 +945,7 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     let w = weight.as_ocl_buffer().unwrap();
     let dy = output_grad.as_ocl_buffer().unwrap();
     
-    if cfg!(feature = "conv2d_bw_batched") {
+    if true { // uses more memory but faster
         let mut dx_col = OclBuffer::<f32>::builder()
             .queue(xpu.queue.clone())
             .len(n * ic*kh*kw * oh*ow)
@@ -962,24 +994,27 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
             assert_eq!(status, CLBlastSuccess);
         }
         
-        { // dx += dx_col.col2im()
-            //let dx_offset = batch*ic*ih*iw;
-            let status = unsafe {
-                CLBlastScol2im(
-                    CLBlastKernelModeCrossCorrelation,
-                    ic, ih, iw,
-                    kh, kw,
-                    ph, pw,
-                    sh, sw,
-                    1, 1, // dilation unused
-                    dx_col.as_ptr() as cl_mem, 0,
-                    dx.as_ptr() as cl_mem, 0,
-                    command_queue as *mut cl_command_queue,
-                    std::ptr::null_mut()
-                )
-            };
-            assert_eq!(status, CLBlastSuccess); 
-        }
+        (0 .. n).into_iter()
+            .for_each(|batch| {
+                // dx += dx_col.col2im()
+                let dx_col_offset = batch*ic*kh*kw*oh*ow;
+                let dx_offset = batch*ic*ih*iw;
+                let status = unsafe {
+                    CLBlastScol2im(
+                        CLBlastKernelModeCrossCorrelation,
+                        ic, ih, iw,
+                        kh, kw,
+                        ph, pw,
+                        sh, sw,
+                        1, 1, // dilation unused
+                        dx_col.as_ptr() as cl_mem, dx_col_offset,
+                        dx.as_ptr() as cl_mem, dx_offset,
+                        command_queue as *mut cl_command_queue,
+                        std::ptr::null_mut()
+                    )
+                };
+                assert_eq!(status, CLBlastSuccess); 
+            });
     }
     else {
     
