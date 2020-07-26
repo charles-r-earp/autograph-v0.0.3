@@ -16,6 +16,6 @@ syn = { version = "1.0.33", features = ["full"] }
 quote = "1.0.7"
 proc-macro2 = "1.0.18"
 
-[dev-dependencies]
-autograph = { path = "../" }
-ndarray = "0.13.1"
+#[dev-dependencies]
+#autograph = { path = "../" }
+#ndarray = "0.13.1"
