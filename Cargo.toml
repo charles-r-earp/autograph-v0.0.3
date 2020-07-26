@@ -12,7 +12,7 @@ categories = ["science"]
 readme = "README.md"
 
 [dependencies]
-autograph_derive = { path = "autograph_derive", optional = true }
+autograph_derive = { version = "0.0.1", optional = true }
 onednn-sys = "0.0.1"
 cpp = "0.5.4"
 rustacuda = { version = "0.1.2", optional = true }
