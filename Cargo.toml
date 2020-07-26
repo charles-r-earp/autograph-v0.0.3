@@ -13,11 +13,11 @@ readme = "README.md"
 
 [dependencies]
 autograph_derive = { path = "autograph_derive", optional = true }
-onednn-sys = { git = "https://github.com/charles-r-earp/onednn-sys" }
+onednn-sys = "0.0.1"
 cpp = "0.5.4"
 rustacuda = { version = "0.1.2", optional = true }
 cuda-sys = { version = "0.2.0", optional = true }
-cuda-cudnn-sys = { git = "https://github.com/charles-r-earp/cuda-cudnn-sys", optional = true }
+cuda-cudnn-sys = { version = "0.0.1", optional = true }
 num-traits = "0.2.11"
 proxy-enum = "0.2.0"
 ndarray = "0.13.1"
