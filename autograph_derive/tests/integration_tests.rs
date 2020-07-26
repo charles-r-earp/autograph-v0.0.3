@@ -1,4 +1,4 @@
-use autograph::autograd::{Variable, ParameterD};
+/*use autograph::autograd::{Variable, ParameterD};
 use autograph::layer::{
     Layer, 
     Forward,
@@ -45,3 +45,4 @@ struct TestSkip {
     meta: String,
     dense1: Dense
 }
+*/
