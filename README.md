@@ -41,6 +41,10 @@ Tested on Ubuntu-18.04, Windows Server 2019, and macOS Catalina 10.15. Generally
 # CUDA
 Cuda can be enabled by passing the feature "cuda" to cargo. CUDA https://developer.nvidia.com/cuda-downloads and cuDNN https://developer.nvidia.com/cudnn must be installed. See https://github.com/bheisler/RustaCUDA and https://github.com/charles-r-earp/cuda-cudnn-sys for additional information. 
 
+# ROCm 
+***under construction***
+Targets AMD GPU's. See prerequisites at (hip-sys https://github.com/charles-r-earp/hip-sys) and (miopen-sys https://github.com/charles-r-earp/miopen-sys). If you have MIOpen with HIP backend installed and running on your GPU (ie with Pytorch or TensorFlow), no additional setup should be necessary. 
+
 # Datasets
 Autograph includes a datasets module enabled with the features datasets. This currently has the MNIST dataset, which is downloaded and saved automatically. The implementation of this is old and outdated (it uses reqwest among others which now uses async), and compiles slowly. Potentially overkill for such a small dataset, but for adding new datasets (like ImageNet), we will need an updated, fast implementation. The datasets module may be moved to its own crate in the future. 
 
@@ -61,33 +65,33 @@ OpenMP is used when available in oneDNN. Without it, execution will be very slow
 
 View the documentation by:
 ```
-cargo doc --open [--features cuda]
+cargo doc --open [--features "cuda rocm"]
 ```
 To add autograph to your project add it as a dependency in your cargo.toml (features are optional):
 ```
 [dependencies]
-autograph = { version = 0.0.3, features = ["cuda"] }
+autograph = { version = 0.0.3, features = ["cuda", "rocm"] }
 // or from github
-autograph = { git = https://github.com/charles-r-earp/autograph, features = ["cuda"] }
+autograph = { git = https://github.com/charles-r-earp/autograph, features = ["cuda", "rocm"] }
 ```
 
 # Tests
 Run the unit-tests with (passing the feature cuda additionally runs cuda tests):
 ```
-cargo test --lib [--features cuda]
+cargo test --lib [--features "cuda rocm"]
 ```
 
 # Examples
 Run the examples with:
 ```
-cargo run --example [example] [--features cuda] --release
+cargo run --example [example] [--features cuda] [--features rocm] --release
 ```
 See the examples directory for the examples.
 
 # Benchmarks
 Run the benchmarks with:
 ```
-cargo bench [--features cuda]
+cargo bench [--features "cuda rocm"]
 ```
 
 # Roadmap 
