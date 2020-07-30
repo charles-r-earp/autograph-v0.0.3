@@ -18,6 +18,8 @@ cpp = "0.5.4"
 rustacuda = { version = "0.1.2", optional = true }
 cuda-sys = { version = "0.2.0", optional = true }
 cuda-cudnn-sys = { git = "https://github.com/charles-r-earp/cuda-cudnn-sys", optional = true }
+hip-sys = { git = "https://github.com/charles-r-earp/hip-sys", optional = true }
+miopen-sys = { git = "https://github.com/charles-r-earp/miopen-sys", optional = true }
 num-traits = "0.2.11"
 proxy-enum = "0.2.0"
 ndarray = "0.13.1"
@@ -40,6 +42,9 @@ default = ["derive", "datasets"]
 derive = ["autograph_derive"]
 datasets = ["byteorder", "flate2", "reqwest"]
 cuda = ["rustacuda", "cuda-sys", "cuda-cudnn-sys"]
+rocm = ["hip-sys", "miopen-sys"]
+# Dev Use Only!
+compile-kernels = []
 
 [dev-dependencies]
 rand = { version = "0.7.3", features=["small_rng"] }
