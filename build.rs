@@ -29,5 +29,24 @@ fn main() {
             assert!(status.success());
         }
     }
+    #[cfg(all(feature = "rocm", feature = "compile-kernels"))]
+    {
+        println!("cargo:rustc-rerun-if-changed=src/cuda/kernels.cu");
+        let status = Command::new("hipify-clang")
+            .arg("src/cuda/kernels.cu")
+            .arg("-o=src/rocm/kernels.hip")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = Command::new("hipcc")
+            .arg("src/rocm/kernels.hip")
+            .arg("-o")
+            .arg("src/rocm/kernels.s")
+            .arg("-S")
+            .arg("-Xclang -emit-llvm")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
     println!("cargo:rustc-rerun-if-changed=build.rs");
 }

@@ -35,6 +35,12 @@ use cuda::CudaBuffer;
 #[cfg(feature = "cuda")]
 pub use cuda::CudaGpu;
 
+#[cfg(feature = "rocm")]
+#[doc(hidden)]
+pub mod rocm;
+#[cfg(feature = "rocm")]
+pub use rocm::RocmGpu;
+
 pub mod nn;
 use nn::{Conv2dArgs, Pool2dArgs};
 
