@@ -54,9 +54,32 @@ pub(super) trait IntoResult {
     fn into_result(self) -> Result<(), Self::Error>;
 }
 
-impl<E: Into<RocmError>> IntoResult for E {
+impl IntoResult for hipError_t {
     type Error = RocmError;
     fn into_result(self) -> Result<(), Self::Error> {
-        Err(self.into())
+        match self {
+            hipError_t::hipSuccess => Ok(()),
+            _ => Err(self.into())
+        }
+    }
+}
+
+impl IntoResult for hipblasStatus_t {
+    type Error = RocmError;
+    fn into_result(self) -> Result<(), Self::Error> {
+        match self {
+            hipblasStatus_t::HIPBLAS_STATUS_SUCCESS => Ok(()),
+            _ => Err(self.into())
+        }
+    }
+}
+
+impl IntoResult for miopenStatus_t {
+    type Error = RocmError;
+    fn into_result(self) -> Result<(), Self::Error> {
+        match self {
+            miopenStatus_t::miopenStatusSuccess => Ok(()),
+            _ => Err(self.into())
+        }
     }
 }
