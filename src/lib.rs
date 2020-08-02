@@ -39,6 +39,8 @@ pub use cuda::CudaGpu;
 #[doc(hidden)]
 pub mod rocm;
 #[cfg(feature = "rocm")]
+use rocm::{RocmBuffer, DeviceCopy as RocmDeviceCopy};
+#[cfg(feature = "rocm")]
 pub use rocm::RocmGpu;
 
 pub mod nn;
@@ -67,9 +69,16 @@ pub trait DeviceCopy {}
 #[cfg(not(feature = "cuda"))]
 impl<T: PrivateNum> DeviceCopy for T {}
 
+#[doc(hidden)]
+#[cfg(not(feature = "rocm"))]
+pub unsafe trait RocmDeviceCopy {}
+
+#[cfg(not(feature = "rocm"))]
+unsafe impl<T: PrivateNum> RocmDeviceCopy for T {}
+
 /// Num is a trait for all data types that Tensor can store, it cannot be implemented for additional types
 pub trait Num:
-    'static + Copy + DeviceCopy + Default + Zero + One + ToPrimitive + Bounded + PartialEq
+    'static + Copy + DeviceCopy + RocmDeviceCopy + Default + Zero + One + ToPrimitive + Bounded + PartialEq
 {
 }
 
@@ -87,6 +96,8 @@ pub enum Buffer<T: Num> {
     Cpu(CpuBuffer<T>),
     #[cfg(feature = "cuda")]
     Cuda(CudaBuffer<T>),
+    //#[cfg(feature = "rocm")]
+    //Rocm(RocmBuffer<T>),
 }
 
 impl<T: Num> From<CpuBuffer<T>> for Buffer<T> {

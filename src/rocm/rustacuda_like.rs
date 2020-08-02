@@ -46,6 +46,9 @@ use hip_sys::hiprt::{
     hipModuleLoadData,
     hipFunction_t,
     hipModuleGetFunction,
+    hipMemcpyHtoD,
+    hipMemcpyDtoD,
+    hipMemcpyDtoH
 };
 use std::{ffi::{CStr, c_void}, mem, slice::{Chunks, ChunksMut}, iter::{ExactSizeIterator, FusedIterator}, ops::{Deref, DerefMut}, marker::PhantomData};
 
@@ -210,6 +213,9 @@ impl CurrentContext {
 
 pub unsafe trait DeviceCopy {}
 
+unsafe impl DeviceCopy for u8 {}
+unsafe impl DeviceCopy for f32 {}
+
 #[repr(transparent)]
 pub struct DevicePointer<T>(*mut T);
 
@@ -250,6 +256,12 @@ impl<T> DeviceSlice<T> {
     }
     unsafe fn from_slice_mut(slice: &mut [T]) -> &mut DeviceSlice<T> {
         &mut *(slice as *mut [T] as *mut DeviceSlice<T>)
+    }
+    fn as_ptr(&self) -> *const T {
+        self.0.as_ptr()
+    }
+    fn as_mut_ptr(&mut self) -> *mut T {
+        self.0.as_mut_ptr()
     }
 }
 
@@ -381,6 +393,88 @@ impl<T> Drop for DeviceBuffer<T> {
                 .expect("Failed to deallocate ROCm Device memory.");
         }
         self.capacity = 0;
+    }
+}
+
+pub(super) trait CopyDestination<O: ?Sized> {
+    fn copy_from(&mut self, source: &O) -> RocmResult<()>;
+    fn copy_to(&self, dest: &mut O) -> RocmResult<()>;
+}
+
+impl<T: DeviceCopy, I: AsRef<[T]> + AsMut<[T]> + ?Sized> CopyDestination<I> for DeviceSlice<T> {
+    fn copy_from(&mut self, val: &I) -> RocmResult<()> {
+        let val = val.as_ref();
+        assert!(
+            self.len() == val.len(),
+            "destination and source slices have different lengths"
+        );
+        let size = mem::size_of::<T>() * self.len();
+        if size != 0 {
+            unsafe {
+                hipMemcpyHtoD(
+                    self.0.as_mut_ptr() as *mut c_void,
+                    val.as_ptr() as *mut c_void,
+                    size,
+                )
+                .into_result()?
+            }
+        }
+        Ok(())
+    }
+    fn copy_to(&self, val: &mut I) -> RocmResult<()> {
+        let val = val.as_mut();
+        assert!(
+            self.len() == val.len(),
+            "destination and source slices have different lengths"
+        );
+        let size = mem::size_of::<T>() * self.len();
+        if size != 0 {
+            unsafe {
+                hipMemcpyDtoH(val.as_mut_ptr() as *mut c_void, self.as_ptr() as *mut c_void, size)
+                    .into_result()?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: DeviceCopy> CopyDestination<DeviceSlice<T>> for DeviceSlice<T> {
+    fn copy_from(&mut self, val: &DeviceSlice<T>) -> RocmResult<()> {
+        assert!(
+            self.len() == val.len(),
+            "destination and source slices have different lengths"
+        );
+        let size = mem::size_of::<T>() * self.len();
+        if size != 0 {
+            unsafe {
+                hipMemcpyDtoD(self.0.as_mut_ptr() as *mut c_void, val.as_ptr() as *mut c_void, size)
+                    .into_result()?
+            }
+        }
+        Ok(())
+    }
+    fn copy_to(&self, val: &mut DeviceSlice<T>) -> RocmResult<()> {
+        assert!(
+            self.len() == val.len(),
+            "destination and source slices have different lengths"
+        );
+        let size = mem::size_of::<T>() * self.len();
+        if size != 0 {
+            unsafe {
+                hipMemcpyDtoD(val.as_mut_ptr() as *mut c_void, self.as_ptr() as *mut c_void, size)
+                    .into_result()?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: DeviceCopy> CopyDestination<DeviceBuffer<T>> for DeviceSlice<T> {
+    fn copy_from(&mut self, val: &DeviceBuffer<T>) -> RocmResult<()> {
+        self.copy_from(val as &DeviceSlice<T>)
+    }
+    fn copy_to(&self, val: &mut DeviceBuffer<T>) -> RocmResult<()> {
+        self.copy_to(val as &mut DeviceSlice<T>)
     }
 }
 
