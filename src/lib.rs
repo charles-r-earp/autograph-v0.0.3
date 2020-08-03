@@ -39,7 +39,7 @@ pub use cuda::CudaGpu;
 #[doc(hidden)]
 pub mod rocm;
 #[cfg(feature = "rocm")]
-use rocm::{RocmBuffer, DeviceCopy as RocmDeviceCopy};
+use rocm::{RocmBuffer, DeviceCopy as RocmDeviceCopy, DeviceSlice as RocmDeviceSlice};
 #[cfg(feature = "rocm")]
 pub use rocm::RocmGpu;
 
@@ -96,8 +96,8 @@ pub enum Buffer<T: Num> {
     Cpu(CpuBuffer<T>),
     #[cfg(feature = "cuda")]
     Cuda(CudaBuffer<T>),
-    //#[cfg(feature = "rocm")]
-    //Rocm(RocmBuffer<T>),
+    #[cfg(feature = "rocm")]
+    Rocm(RocmBuffer<T>),
 }
 
 impl<T: Num> From<CpuBuffer<T>> for Buffer<T> {
@@ -113,12 +113,21 @@ impl<T: Num> From<CudaBuffer<T>> for Buffer<T> {
     }
 }
 
+#[cfg(feature = "rocm")]
+impl<T: Num> From<RocmBuffer<T>> for Buffer<T> {
+    fn from(rocm_buffer: RocmBuffer<T>) -> Self {
+        Buffer::Rocm(rocm_buffer)
+    }
+}
+
 impl<T: Num> Buffer<T> {
     unsafe fn uninitialized(device: &Device, len: usize) -> Self {
         match device {
             Device::Cpu(_) => CpuBuffer::uninitialized(len).into(),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => CudaBuffer::uninitialized(cuda_gpu, len).into(),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(rocm_gpu) => RocmBuffer::uninitialized(rocm_gpu, len).into()
         }
     }
     fn from_vec<'a>(device: &Device, vec: impl Into<Cow<'a, [T]>>) -> Self {
@@ -128,6 +137,15 @@ impl<T: Num> Buffer<T> {
             Device::Cuda(cuda_gpu) => {
                 let slice = vec.into();
                 let mut buffer = unsafe { CudaBuffer::uninitialized(cuda_gpu, slice.len()) };
+                buffer.copy_from_slice(slice);
+                buffer.into()
+            },
+            #[cfg(feature = "rocm")]
+            Device::Rocm(rocm_gpu) => {
+                let slice = vec.into();
+                let mut buffer = unsafe { 
+                    RocmBuffer::uninitialized(rocm_gpu, slice.len()) 
+                };
                 buffer.copy_from_slice(slice);
                 buffer.into()
             }
@@ -141,6 +159,14 @@ impl<T: Num> Buffer<T> {
                 let mut buffer = unsafe { CudaBuffer::uninitialized(cuda_gpu, len) };
                 buffer.fill(T::zero());
                 buffer.into()
+            },
+            #[cfg(feature = "rocm")]
+            Device::Rocm(rocm_gpu) => {
+                let mut buffer = unsafe { 
+                    RocmBuffer::uninitialized(rocm_gpu, len) 
+                };
+                buffer.fill(T::zero());
+                buffer.into()
             }
         }
     }
@@ -149,6 +175,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.len(),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.len(),
+            #[cfg(feature = "rocm")]
+            Buffer::Rocm(rocm_buffer) => rocm_buffer.len(),
         }
     }
     fn fill(&mut self, elem: T) {
@@ -156,6 +184,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.fill(elem),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.fill(elem),
+            #[cfg(feature = "rocm")]
+            Buffer::Rocm(rocm_buffer) => rocm_buffer.fill(elem),
         }
     }
     fn as_slice(&self) -> Cow<[T]> {
@@ -163,13 +193,17 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.as_slice().into(),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.to_vec().into(),
+            #[cfg(feature = "rocm")]
+            Buffer::Rocm(rocm_buffer) => rocm_buffer.to_vec().into(),
         }
     }
     fn copy_from_slice<'a>(&mut self, slice: impl Into<Cow<'a, [T]>>) {
         match self {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.copy_from_slice(slice),
             #[cfg(feature = "cuda")]
-            Buffer::Cuda(cuda_buffer) => cuda_buffer.copy_from_slice(slice)
+            Buffer::Cuda(cuda_buffer) => cuda_buffer.copy_from_slice(slice),
+            #[cfg(feature = "rocm")]
+            Buffer::Rocm(rocm_buffer) => rocm_buffer.copy_from_slice(slice)
         }
     }
     fn cpu(&self) -> Option<&CpuBuffer<T>> {
@@ -198,6 +232,20 @@ impl<T: Num> Buffer<T> {
             _ => None,
         }
     }
+    #[cfg(feature = "rocm")]
+    fn rocm(&self) -> Option<&RocmBuffer<T>> {
+        match self {
+            Buffer::Rocm(rocm_buffer) => Some(rocm_buffer),
+            _ => None,
+        }
+    }
+    #[cfg(feature = "rocm")]
+    fn rocm_mut(&mut self) -> Option<&mut RocmBuffer<T>> {
+        match self {
+            Buffer::Rocm(rocm_buffer) => Some(rocm_buffer),
+            _ => None,
+        }
+    }
 }
 
 /// Device is an enum that is used to select whether to store and execute operations on the cpu or a gpu.\
@@ -213,6 +261,8 @@ pub enum Device {
     Cpu(Arc<Cpu>),
     #[cfg(feature = "cuda")]
     Cuda(Arc<CudaGpu>),
+    #[cfg(feature = "rocm")]
+    Rocm(Arc<RocmGpu>)
 }
 
 impl Device {
@@ -229,11 +279,21 @@ impl Device {
             _ => None,
         }
     }
-    /// For cpu does nothing. For cuda, blocks until all operations on the device are finished. Only necessary for timing ie for benchmarks. Any tranfers back to the cpu will implicitly synchronize.
+    #[cfg(feature = "rocm")]
+    fn rocm(&self) -> Option<&Arc<RocmGpu>> {
+        match self {
+            Device::Rocm(rocm_gpu) => Some(rocm_gpu),
+            _ => None,
+        }
+    }
+    /// For cpu does nothing. For cuda / rocm, blocks until all operations on the device are finished. Only necessary for timing ie for benchmarks. Any tranfers back to the cpu will implicitly synchronize.
     pub fn synchronize(&self) {
-        #[cfg(feature = "cuda")]
-        {
-            self.cuda().map(|gpu| gpu.synchronize());
+        match self {
+            Device::Cpu(_) => (),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(cuda_gpu) => cuda_gpu.synchronize(),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(rocm_gpu) => rocm_gpu.synchronize()
         }
     }
 }
@@ -243,6 +303,9 @@ impl Default for Device {
     fn default() -> Self {
         #[cfg(feature = "cuda")] {
             return CudaGpu::new(0).into();
+        }
+        #[cfg(feature = "rocm")] {
+            return RocmGpu::new(0).into();
         }
         Cpu::new().into()
     }
@@ -261,18 +324,22 @@ impl From<Arc<CudaGpu>> for Device {
     }
 }
 
+#[cfg(feature = "rocm")]
+impl From<Arc<RocmGpu>> for Device {
+    fn from(rocm_gpu: Arc<RocmGpu>) -> Self {
+        Device::Rocm(rocm_gpu)
+    }
+}
+
 impl PartialEq for Device {
     fn eq(&self, other: &Self) -> bool {
-        match self {
-            Device::Cpu(cpu1) => match other {
-                Device::Cpu(cpu2) => Arc::ptr_eq(cpu1, cpu2),
-                _ => false,
-            },
+        match (self, other) {
+            (Device::Cpu(a), Device::Cpu(b)) => Arc::ptr_eq(a, b),
             #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_gpu1) => match other {
-                Device::Cuda(cuda_gpu2) => Arc::ptr_eq(cuda_gpu1, cuda_gpu2),
-                _ => false,
-            },
+            (Device::Cuda(a), Device::Cuda(b)) => Arc::ptr_eq(a, b),
+            #[cfg(feature = "rocm")]
+            (Device::Rocm(a), Device::Rocm(b)) => Arc::ptr_eq(a, b),
+            _ => false
         }
     }
 }
@@ -692,12 +759,20 @@ impl<T: Num, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
     fn as_cuda_slice(&self) -> Option<&DeviceSlice<T>> {
         self.data.buffer().cuda().map(|b| b.as_device_slice())
     }
+    #[cfg(feature = "rocm")]
+    fn as_rocm_slice(&self) -> Option<&RocmDeviceSlice<T>> {
+        self.data.buffer().rocm().map(|b| b.as_device_slice())
+    }
     fn as_cpu_ptr(&self) -> Option<*const T> {
         self.data.buffer().cpu().map(|b| b.as_ptr())
     }
     #[cfg(feature = "cuda")]
     fn as_cuda_ptr(&self) -> Option<*const T> {
         self.data.buffer().cuda().map(|b| b.as_ptr())
+    }
+    #[cfg(feature = "rocm")]
+    fn as_rocm_ptr(&self) -> Option<*const T> {
+        self.data.buffer().rocm().map(|b| b.as_ptr())
     }
 }
 
@@ -709,6 +784,8 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::reduce_sum(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::reduce_sum(self, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::reduce_sum(self, &mut output)
         }
         output
     }
@@ -719,6 +796,8 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::relu(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::relu(self, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::relu(self, &mut output) 
         }
         output
     }
@@ -733,6 +812,8 @@ impl<S: DataMut<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::add(self, rhs, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::add(self, rhs, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::add(self, rhs, &mut output)
         }
         output
     }
@@ -744,6 +825,8 @@ impl<S: DataMut<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::scaled_add(self, alpha, rhs),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::scaled_add(self, alpha, rhs),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::scaled_add(self, alpha, rhs)
         }
     }
 }
@@ -759,6 +842,8 @@ impl<T: Unsigned, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::unsigned_to_f32(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_f32(self, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::unsigned_to_f32(self, &mut output)
         }
         output
     }
@@ -773,6 +858,8 @@ impl<T: Unsigned, S: DataRef<Elem = T>> TensorBase<S, Ix1> {
             Device::Cpu(cpu) => cpu::unsigned_to_one_hot_f32(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_one_hot_f32(self, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::unsigned_to_one_hot_f32(self, &mut output) 
         }
         output
     }
@@ -803,6 +890,13 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
             .cuda_mut()
             .map(|b| b.as_mut_device_slice())
     }
+    #[cfg(feature = "rocm")]
+    fn as_mut_rocm_slice(&mut self) -> Option<&mut RocmDeviceSlice<T>> {
+        self.data
+            .buffer_mut()
+            .rocm_mut()
+            .map(|b| b.as_mut_device_slice())
+    }
     fn as_mut_cpu_ptr(&mut self) -> Option<*mut T> {
         self.data.buffer_mut().cpu_mut().map(|mut b| b.as_mut_ptr())
     }
@@ -813,11 +907,18 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
             .cuda_mut()
             .map(|mut b| b.as_mut_ptr())
     }
+    #[cfg(feature = "rocm")]
+    fn as_mut_rocm_ptr(&mut self) -> Option<*mut T> {
+        self.data
+            .buffer_mut()
+            .rocm_mut()
+            .map(|mut b| b.as_mut_ptr())
+    }
     /// Fills the tensor with the provided elem.  
     pub fn fill(&mut self, elem: T) {
         self.data.buffer_mut().fill(elem);
     }
-    /// Fills the tensor with data sampled from distr with the given rng. On cuda, samples into a vec and then copies to the device buffer
+    /// Fills the tensor with data sampled from distr with the given rng. On cuda / rocm, samples into a vec and then copies to the device buffer
     pub fn fill_random(&mut self, distr: &impl Distribution<T>, mut rng: &mut impl Rng) {
         match self.data.buffer_mut() {
             Buffer::Cpu(cpu_buffer) => {
@@ -834,6 +935,14 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
                     .take(cuda_buffer.len())
                     .collect();
                 cuda_buffer.copy_from_slice(&vec);
+            },
+            #[cfg(feature = "rocm")]
+            Buffer::Rocm(rocm_buffer) => {
+                let vec: Vec<T> = distr
+                    .sample_iter(&mut rng)
+                    .take(rocm_buffer.len())
+                    .collect();
+                rocm_buffer.copy_from_slice(&vec);
             }
         }
     }
@@ -903,6 +1012,8 @@ fn broadcast<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D: Dimension>
         Device::Cpu(cpu) => cpu::broadcast(input, output),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast(input, output),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => rocm::broadcast(input, output)
     }
 }
 
@@ -915,6 +1026,8 @@ fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Dimen
         Device::Cpu(cpu) => cpu::broadcast_backward(input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast_backward(input_grad, output_grad),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => rocm::broadcast_backward(input_grad, output_grad)
     }
 }
 
@@ -936,6 +1049,8 @@ fn relu_backward<
         Device::Cpu(cpu) => cpu::relu_backward(input, input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::relu_backward(input, input_grad, output_grad),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => rocm::relu_backward(input, input_grad, output_grad)
     }
 }
 
@@ -960,6 +1075,8 @@ fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32
         Device::Cpu(_) => cpu::gemm(alpha, a, trans_a, b, trans_b, beta, c),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::gemm(alpha, a, trans_a, b, trans_b, beta, c),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => rocm::gemm(alpha, a, trans_a, b, trans_b, beta, c)
     }
 }
 
@@ -985,6 +1102,10 @@ fn cross_entropy_backward<
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => {
             cuda::cross_entropy_backward(input, input_grad, target, output_grad)
+        },
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            rocm::cross_entropy_backward(input, input_grad, target, output_grad)
         }
     }
 }
@@ -1031,6 +1152,8 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix2> {
             Device::Cpu(cpu) => cpu::cross_entropy(self, target, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::cross_entropy(self, target, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::cross_entropy(self, target, &mut output),
         }
         output.sum()
     }
@@ -1106,6 +1229,8 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix4> {
             Device::Cpu(_) => cpu::conv2d(self, weight, bias, args, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => cuda::conv2d(self, weight, bias, args, &mut output),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => rocm::conv2d(self, weight, bias, args, &mut output),
         }
         output
     }
@@ -1139,6 +1264,8 @@ fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
         Device::Cpu(_) => cpu::conv2d_backward_input(input_grad, weight, args, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::conv2d_backward_input(input_grad, weight, args, output_grad),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => rocm::conv2d_backward_input(input_grad, weight, args, output_grad),
     }
 }
 
@@ -1164,6 +1291,10 @@ fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => {
             cuda::conv2d_backward_weight_bias(input, weight_grad, bias_grad, args, output_grad)
+        },
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            rocm::conv2d_backward_weight_bias(input, weight_grad, bias_grad, args, output_grad)
         }
     }
 }
@@ -1190,6 +1321,11 @@ fn max_pool2d_forward<S1: DataRef<Elem = f32>>(
         Device::Cuda(_) => {
             cuda::max_pool2d(input, args, &mut output);
             None
+        },
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            let workspace = rocm::max_pool2d_forward(input, args, train, &mut output);
+            workspace.map(|ws| ws.into())
         }
     };
     (output, workspace)
@@ -1213,6 +1349,11 @@ fn max_pool2d_backward<
         Device::Cpu(_) => cpu::max_pool2d_backward(input, input_grad, args, workspace, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::max_pool2d_backward(input, input_grad, args, output_grad),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            let workspace = workspace.map(|w| w.rocm().unwrap());
+            rocm::max_pool2d_backward(input, input_grad, args, workspace, output_grad)
+        }
     }
 }
 
@@ -1227,6 +1368,8 @@ fn sgd_with_momentum<S1: DataMut<Elem=f32>, S2: DataRef<Elem=f32>, S3: DataMut<E
     match weight.device() {
         Device::Cpu(_) => cpu::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity),
         #[cfg(feature="cuda")]
-        Device::Cuda(_) => cuda::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity)
+        Device::Cuda(_) => cuda::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity),
+        #[cfg(feature="rocm")]
+        Device::Rocm(_) => rocm::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity)
     }                                     
 } 

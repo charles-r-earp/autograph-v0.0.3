@@ -17,6 +17,11 @@ fn test_tensor_from_vec_cpu() {
 fn test_tensor_from_vec_cuda() {
     test_tensor_from_vec(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_tensor_from_vec_rocm() {
+    test_tensor_from_vec(RocmGpu::new(0));
+}
 fn test_u8_to_f32(device: impl Into<Device>) {
     let device = device.into();
     let vec: Vec<u8> = vec![1, 2, 3, 4];
@@ -35,6 +40,11 @@ fn test_u8_to_f32_cpu() {
 #[test]
 fn test_u8_to_f32_cuda() {
     test_u8_to_f32(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_u8_to_f32_rocm() {
+    test_u8_to_f32(RocmGpu::new(0));
 }
 fn test_u8_to_one_hot_f32(device: impl Into<Device>) {
     let device = device.into();
@@ -61,6 +71,11 @@ fn test_u8_to_one_hot_f32_cpu() {
 fn test_u8_to_one_hot_f32_cuda() {
     test_u8_to_one_hot_f32(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_u8_to_one_hot_f32_rocm() {
+    test_u8_to_one_hot_f32(RocmGpu::new(0));
+}
 fn test_fill_u8(device: impl Into<Device>) {
     let device = device.into();
     let n = 10;
@@ -78,6 +93,11 @@ fn test_fill_u8_cpu() {
 fn test_fill_u8_cuda() {
     test_fill_u8(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_fill_u8_rocm() {
+    test_fill_u8(RocmGpu::new(0));
+}
 fn test_fill_f32(device: impl Into<Device>) {
     let device = device.into();
     let n = 10;
@@ -94,6 +114,11 @@ fn test_fill_f32_cpu() {
 #[test]
 fn test_fill_f32_cuda() {
     test_fill_f32(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_fill_f32_() {
+    test_fill_f32(RocmGpu::new(0));
 }
 fn test_broadcast(device: impl Into<Device>) {
     let device = device.into();
@@ -113,6 +138,11 @@ fn test_broadcast_cpu() {
 fn test_broadcast_cuda() {
     test_broadcast(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_broadcast_rocm() {
+    test_broadcast(RocmGpu::new(0));
+}
 fn test_broadcast_backward(device: impl Into<Device>) {
     let device = device.into();
     let mut dx = Tensor::zeros(&device, 4);
@@ -130,6 +160,11 @@ fn test_broadcast_backward_cpu() {
 #[test]
 fn test_broadcast_backward_cuda() {
     test_broadcast_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_broadcast_backward_rocm() {
+    test_broadcast_backward(RocmGpu::new(0));
 }
 fn compare_vectors(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) {
     // dnnl and cuda have fast mul / approx ops
@@ -220,6 +255,11 @@ fn test_gemm_cpu() {
 fn test_gemm_cuda() {
     test_gemm(CudaGpu::new(0));
 }
+#[cfg(feature = "cuda")]
+#[test]
+fn test_gemm_rocm() {
+    test_gemm(RocmGpu::new(0));
+}
 fn test_sum(device: impl Into<Device>) {
     let device = device.into();
 
@@ -238,6 +278,11 @@ fn test_sum_cpu() {
 fn test_sum_cuda() {
     test_sum(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_sum_rocm() {
+    test_sum(RocmGpu::new(0));
+}
 fn test_relu(device: impl Into<Device>) {
     let device = device.into();
     let x = Tensor::from_shape_vec(&device, 6, vec![-0.1, -100., 0.0, 0.1, 1., 100.]);
@@ -253,6 +298,11 @@ fn test_relu_cpu() {
 #[test]
 fn test_relu_cuda() {
     test_relu(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_relu_rocm() {
+    test_relu(RocmGpu::new(0));
 }
 fn test_relu_backward(device: impl Into<Device>) {
     let device = device.into();
@@ -281,6 +331,11 @@ fn test_relu_backard_cpu() {
 fn test_relu_backward_cuda() {
     test_relu(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_relu_backward_rocm() {
+    test_relu(RocmGpu::new(0));
+}
 fn test_add(device: impl Into<Device>) {
     let device = device.into();
     let x1_vec = vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 10.];
@@ -303,6 +358,11 @@ fn test_add_cpu() {
 #[test]
 fn test_add_cuda() {
     test_add(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_add_rocm() {
+    test_add(RocmGpu::new(0));
 }
 fn test_scaled_add(device: impl Into<Device>) {
     let device = device.into();
@@ -329,6 +389,20 @@ fn test_scaled_add(device: impl Into<Device>) {
         lhs_true.as_slice().unwrap()
     );
 }
+#[test]
+fn test_scaled_add_cpu() {
+    test_scaled_add(Cpu::new());
+}
+#[cfg(feature = "cuda")]
+#[test]
+fn test_scaled_add_cuda() {
+    test_scaled_add(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_scaled_add_rocm() {
+    test_scaled_add(RocmGpu::new(0));
+}
 fn test_cross_entropy(device: impl Into<Device>) {
     let device = device.into();
 
@@ -350,13 +424,11 @@ fn test_cross_entropy(device: impl Into<Device>) {
     let mut output = Tensor::zeros(&device, [batch_size, nclasses]);
 
     match &device {
-        Device::Cpu(_) => {
-            cpu::cross_entropy(&input, &target, &mut output);
-        }
+        Device::Cpu(_) => cpu::cross_entropy(&input, &target, &mut output),
         #[cfg(feature = "cuda")]
-        Device::Cuda(_) => {
-            cuda::cross_entropy(&input, &target, &mut output);
-        }
+        Device::Cuda(_) => cuda::cross_entropy(&input, &target, &mut output),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => rocm::cross_entropy(&input, &target, &mut output)
     }
 
     let mut output_true = vec![0.; batch_size * nclasses];
@@ -394,6 +466,11 @@ fn test_cross_entropy_cpu() {
 #[test]
 fn test_cross_entropy_cuda() {
     test_cross_entropy(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_cross_entropy_rocm() {
+    test_cross_entropy(RocmGpu::new(0));
 }
 fn test_cross_entropy_backward(device: impl Into<Device>) {
     let device = device.into();
@@ -443,6 +520,11 @@ fn test_cross_entropy_backward_cpu() {
 #[test]
 fn test_cross_entropy_backward_cuda() {
     test_cross_entropy_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_cross_entropy_backward_rocm() {
+    test_cross_entropy_backward(RocmGpu::new(0));
 }
 fn test_conv2d_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
@@ -554,6 +636,11 @@ fn test_conv2d_cpu() {
 fn test_conv2d_cuda() {
     test_conv2d(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_conv2d_rocm() {
+    test_conv2d(RocmGpu::new(0));
+}
 fn test_conv2d_backward_input_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     outputs: usize,
@@ -648,6 +735,11 @@ fn test_conv2d_backward_input_cpu() {
 #[test]
 fn test_conv2d_backward_input_cuda() {
     test_conv2d_backward_input(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_conv2d_backward_input_rocm() {
+    test_conv2d_backward_input(RocmGpu::new(0));
 }
 fn test_conv2d_backward_weight_bias_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
@@ -783,6 +875,11 @@ fn test_conv2d_backward_weight_bias(device: impl Into<Device>) {
 fn test_conv2d_backward_weight_bias_cuda() {
     test_conv2d_backward_weight_bias(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_conv2d_backward_weight_bias_rocm() {
+    test_conv2d_backward_weight_bias(RocmGpu::new(0));
+}
 fn test_max_pool2d_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     args: &Pool2dArgs,
@@ -834,6 +931,11 @@ fn test_max_pool2d_cpu() {
 #[test]
 fn test_max_pool2d_cuda() {
     test_max_pool2d(CudaGpu::new(0));
+}
+#[cfg(feature = "rocm")]
+#[test]
+fn test_max_pool2d_rocm() {
+    test_max_pool2d(RocmGpu::new(0));
 }
 fn test_max_pool2d_backward_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
@@ -902,6 +1004,11 @@ fn test_max_pool2d_backward_cpu() {
 fn test_max_pool_backward_cuda() {
     test_max_pool2d_backward(CudaGpu::new(0));
 }
+#[cfg(feature = "rocm")]
+#[test]
+fn test_max_pool_backward_rocm() {
+    test_max_pool2d_backward(RocmGpu::new(0));
+}
 fn test_sgd_with_momentum(device: impl Into<Device>) {
     let device = device.into();
     let mut weight = Tensor::from_shape_vec(&device, 4, vec![0.1, 0.2, 0.3, 0.4]);
@@ -943,4 +1050,9 @@ fn test_sgd_with_momentum_cpu() {
 #[test]
 fn test_sgd_with_momentum_cuda() {
     test_sgd_with_momentum(CudaGpu::new(0));
+}
+#[cfg(feature="rocm")]
+#[test]
+fn test_sgd_with_momentum_rocm() {
+    test_sgd_with_momentum(RocmGpu::new(0));
 }
