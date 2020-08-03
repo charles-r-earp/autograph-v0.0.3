@@ -10,7 +10,7 @@ Machine Learning Library for Rust
 # Features
   - Safe API
   - Thread Safe
-  - CPU and CUDA are fully supported
+  - CPU, CUDA, and ROCm are fully supported
   - Flexible (Dynamic Backward Graph)
 
 ## Layers
