@@ -32,18 +32,19 @@ fn main() {
     #[cfg(all(feature = "rocm", feature = "compile-kernels"))]
     {
         println!("cargo:rustc-rerun-if-changed=src/cuda/kernels.cu");
-        let status = Command::new("hipify-clang")
+        /*let status = Command::new("hipify-clang")
             .arg("src/cuda/kernels.cu")
             .arg("-o=src/rocm/kernels.hip")
             .status()
             .unwrap();
-        assert!(status.success());
+        assert!(status.success());*/
         let status = Command::new("hipcc")
-            .arg("src/rocm/kernels.hip")
+            .arg("-include")
+            .arg("hip/hip_runtime.h")
+            .arg("src/cuda/kernels.cu")
+            .arg("--genco")
             .arg("-o")
-            .arg("src/rocm/kernels.s")
-            .arg("-S")
-            .arg("-Xclang -emit-llvm")
+            .arg("src/rocm/kernels.hsaco")
             .status()
             .unwrap();
         assert!(status.success());

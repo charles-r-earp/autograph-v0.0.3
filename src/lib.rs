@@ -1055,12 +1055,12 @@ fn relu_backward<
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Transpose {
+pub enum Transpose {
     No,
     Yes,
 }
 
-fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32>>(
+pub fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32>>(
     alpha: f32,
     a: &TensorBase<S1, Ix2>,
     trans_a: Transpose,

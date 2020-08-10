@@ -29,6 +29,7 @@ DEALINGS IN THE SOFTWARE.
 use super::{RocmResult, IntoResult};
 
 use hip_sys::hiprt::{
+    hipInit,
     hipError_t,
     hipMalloc,
     hipFree,
@@ -43,16 +44,33 @@ use hip_sys::hiprt::{
     hipStreamDestroy,
     hipStreamSynchronize,
     hipModule_t,
+    hipModuleLoad,
     hipModuleLoadData,
     hipFunction_t,
     hipModuleGetFunction,
     hipMemcpyHtoD,
     hipMemcpyDtoD,
     hipMemcpyDtoH,
-    hipLaunchKernel,
-    dim3
+    //hipLaunchKernel,
+    hipModuleLaunchKernel
+    //dim3
 };
 use std::{ffi::{CStr, c_void}, mem, slice::{Chunks, ChunksMut}, iter::{ExactSizeIterator, FusedIterator}, ops::{Deref, DerefMut}, marker::PhantomData};
+
+pub(super) struct HipFlags(u32);
+
+impl HipFlags {
+    pub(super) fn empty() -> Self {
+        HipFlags(0)
+    }
+}
+
+
+pub(super) fn init(flags: HipFlags) -> RocmResult<()> {
+    unsafe {
+        hipInit(flags.0).into_result()
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct RocmDevice {
@@ -224,7 +242,7 @@ impl Stream {
         func: &Function,
         grid_size: G,
         block_size: B,
-        shared_mem_bytes: usize,
+        shared_mem_bytes: u32,
         args: &[*mut c_void],
     ) -> RocmResult<()>
     where
@@ -233,22 +251,29 @@ impl Stream {
     {
         let grid_size: GridSize = grid_size.into();
         let block_size: BlockSize = block_size.into();
-
-        hipLaunchKernel(
-            func.as_mut_ptr() as *mut _,
-            dim3 {
-                x: grid_size.x,
-                y: grid_size.y,
-                z: grid_size.z,
-            },
-            dim3 {
-                x: block_size.x,
-                y: block_size.y,
-                z: block_size.z,
-            },
-            args.as_ptr() as *mut _,
+        
+        // hip currently requires kernel args to be passed as "extra", the last argument to hipModuleLaunchKernel,
+        // with this format
+        //let size = args.len() * std::mem::size_of::<usize>();
+        /*let mut config = [
+            0x01 as *mut _, args.as_ptr() as *mut _,
+            0x02 as *mut _, &size as *const usize as *mut _,
+            0x03 as *mut _
+        ];*/
+        
+        hipModuleLaunchKernel(
+            func.as_mut_ptr(),
+            grid_size.x,
+            grid_size.y,
+            grid_size.z,
+            block_size.x,
+            block_size.y,
+            block_size.z,
             shared_mem_bytes,
             self.stream,
+            args.as_ptr() as *mut _,
+            std::ptr::null_mut(),
+            //config.as_mut_ptr()
         ).into_result()
     }
 }
@@ -268,6 +293,17 @@ pub struct Module {
 }
 
 impl Module {
+    pub(super) fn load_from_file(filename: &CStr) -> RocmResult<Module> {
+        let mut module: hipModule_t = std::ptr::null_mut();
+        let error = unsafe {
+            hipModuleLoad(
+                &mut module as *mut hipModule_t,        
+                filename.as_ptr()
+            )
+        };
+        error.into_result()?;
+        Ok(Self { module })
+    }
     pub(super) fn load_from_string(image: &CStr) -> RocmResult<Self> {
         let mut module: hipModule_t = std::ptr::null_mut();
         let error = unsafe {
@@ -385,7 +421,7 @@ impl<T> DevicePointer<T> {
         self.0
     }
     fn is_null(&self) -> bool {
-        self.is_null()
+        self.0.is_null()
     }
 }
 
@@ -512,9 +548,12 @@ impl<T> DeviceBuffer<T> {
     pub(super) unsafe fn uninitialized(size: usize) -> RocmResult<Self> {
         let ptr = if size > 0 && mem::size_of::<T>() > 0 {
             let mut ptr = std::ptr::null_mut();
+            let nbytes = std::mem::size_of::<T>().checked_mul(size).unwrap_or(0);
+            // FIXME: convert to result?
+            assert_ne!(nbytes, 0);
             let error = hipMalloc(
                 &mut ptr as *mut *mut T as *mut *mut c_void,
-                size
+                nbytes
             );
             error.into_result()?;
             DevicePointer::wrap(ptr)
@@ -548,6 +587,7 @@ impl<T> DerefMut for DeviceBuffer<T> {
         }
     }
 }
+
 impl<T> Drop for DeviceBuffer<T> {
     fn drop(&mut self) {
         if self.buf.is_null() {
@@ -663,20 +703,19 @@ macro_rules! hip_launch {
     };
     ($function:ident <<<$grid:expr, $block:expr, $shared:expr, $stream:ident>>>( $( $arg:expr),* )) => {
         {
-            //fn assert_impl_devicecopy<T: $crate::memory::DeviceCopy>(_val: T) {};
             fn assert_impl_devicecopy<T: $crate::rocm::DeviceCopy>(_val: T) {};
             if false {
                 $(
                     assert_impl_devicecopy($arg);
                 )*
             };
-
+            
             $stream.launch(&$function, $grid, $block, $shared,
-                &[
+                &[ 
                     $(
                         &$arg as *const _ as *mut ::std::ffi::c_void,
                     )*
-                ]
+                ] 
             )
         }
     };

@@ -7,6 +7,8 @@ use autograph::nn::{
 };
 #[cfg(feature = "cuda")]
 use autograph::CudaGpu;
+#[cfg(feature = "rocm")]
+use autograph::RocmGpu;
 use autograph::{ArcTensor, Cpu, Device, Tensor, Tensor2, Tensor4, TensorView4};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ndarray::{Dimension, Ix2, Ix4};
@@ -96,13 +98,22 @@ fn bench_autograph_lenet5(c: &mut Criterion, device: &Device, batch_size: usize)
                 .fill_random(&Normal::new(0., 0.01).unwrap(), &mut rng)
         }
     });
+    
+    let device_kind = match device {
+        Device::Cpu(_) => "cpu",
+        #[cfg(feature = "cuda")]
+        Device::Cuda(_) => "cuda",
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => "rocm",
+        _ => "unknown"
+    };
 
     let lr = 0.001;
 
     let x = ArcTensor::ones(&device, [batch_size, 1, 28, 28]);
     let t = Tensor::<u8, _>::zeros(&device, batch_size);
     c.bench_function(
-        &format!("autograph_lenet5_train_{}_{:?}", batch_size, device),
+        &format!("autograph_lenet5_train_{}_{}", batch_size, device_kind),
         |b| {
             b.iter(|| {
                 model.set_training(true);
@@ -124,7 +135,7 @@ fn bench_autograph_lenet5(c: &mut Criterion, device: &Device, batch_size: usize)
     let x = ArcTensor::ones(&device, [batch_size, 1, 28, 28]);
     let t = Tensor::<u8, _>::zeros(&device, batch_size);
     c.bench_function(
-        &format!("autograph_lenet5_eval_{}_{:?}", batch_size, device),
+        &format!("autograph_lenet5_eval_{}_{}", batch_size, device_kind),
         |b| {
             b.iter(|| {
                 model.set_training(false);
@@ -227,6 +238,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     #[cfg(feature = "cuda")]
     {
         let gpu = Device::from(CudaGpu::new(0));
+        bench_autograph_lenet5(c, &gpu, 256);
+    }
+    #[cfg(feature = "rocm")]
+    {
+        let gpu = Device::from(RocmGpu::new(0));
         bench_autograph_lenet5(c, &gpu, 256);
     }
     bench_tch_lenet5(c, tch::Device::Cpu, 256);

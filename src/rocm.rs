@@ -2,7 +2,7 @@ use crate::{
     Conv2dArgs, DataMut, DataRef, Num, Pool2dArgs, Tensor, Tensor4, TensorBase, TensorView1,
     TensorView4, TensorViewMut1, TensorViewMut4, Transpose, Unsigned,
 };
-use std::{sync::{Arc, Mutex, LockResult, MutexGuard, PoisonError}, ffi::{CString, c_void}, borrow::Cow, any::TypeId, fmt::{self, Debug}};
+use std::{sync::{Arc, Mutex, LockResult, MutexGuard, PoisonError}, ffi::{CString, CStr, c_void}, borrow::Cow, any::TypeId, fmt::{self, Debug}};
 
 use hip_sys::hiprt::{
     hipError_t,
@@ -28,6 +28,7 @@ use miopen_sys::{
     miopenCreateTensorDescriptor,
     miopenDestroyTensorDescriptor,
     miopenSetTensorDescriptor,
+    miopenSet4dTensorDescriptor,
     miopenDataType_t,
     miopenConvolutionDescriptor_t,
     miopenCreateConvolutionDescriptor,
@@ -35,16 +36,20 @@ use miopen_sys::{
     miopenInitConvolutionDescriptor,
     miopenConvolutionMode_t,
     miopenConvSolution_t,
-    miopenConvolutionForwardGetSolution,
-    miopenConvolutionForwardGetSolutionWorkspaceSize,
-    miopenConvolutionForwardImmediate,
+    miopenFindConvolutionForwardAlgorithm,
+    miopenConvAlgoPerf_t,
+    miopenConvFwdAlgorithm_t,
+    miopenConvBwdDataAlgorithm_t,
+    miopenConvBwdWeightsAlgorithm_t,
+    miopenConvolutionForward,
+    miopenConvolutionForwardGetWorkSpaceSize,
     miopenConvolutionForwardBias,
-    miopenConvolutionBackwardDataGetSolution,
-    miopenConvolutionBackwardDataGetSolutionWorkspaceSize,
-    miopenConvolutionBackwardDataImmediate,
-    miopenConvolutionBackwardWeightsGetSolution,
-    miopenConvolutionBackwardWeightsGetSolutionWorkspaceSize,
-    miopenConvolutionBackwardWeightsImmediate,
+    miopenFindConvolutionBackwardDataAlgorithm,
+    miopenConvolutionBackwardDataGetWorkSpaceSize,
+    miopenConvolutionBackwardData,
+    miopenConvolutionBackwardWeightsGetWorkSpaceSize,
+    miopenFindConvolutionBackwardWeightsAlgorithm,
+    miopenConvolutionBackwardWeights,
     miopenConvolutionBackwardBias,
     miopenActivationDescriptor_t,
     miopenCreateActivationDescriptor,
@@ -60,7 +65,11 @@ use miopen_sys::{
     miopenPoolingMode_t,
     miopenPoolingGetWorkSpaceSizeV2,
     miopenPoolingForward,
-    miopenPoolingBackward
+    miopenPoolingBackward,
+    miopenFusionPlanDescriptor_t,
+    miopenCreateFusionPlan,
+    miopenDestroyFusionPlan,
+    miopenFusionDirection_t
 };
 
 use ndarray::{Dimension, IntoDimension, Ix0, Ix1, Ix2, Ix4, IxDyn};
@@ -72,7 +81,7 @@ use error::{RocmError, RocmResult, IntoResult};
 #[macro_use]
 pub mod rustacuda_like;
 pub(crate) use rustacuda_like::{DeviceCopy, DeviceSlice};
-use rustacuda_like::{RocmDevice, Context, ContextFlags, CurrentContext, Stream, StreamFlags, Module, DevicePointer, DeviceBuffer, CopyDestination, launch}; 
+use rustacuda_like::{init, HipFlags, RocmDevice, Context, ContextFlags, CurrentContext, Stream, StreamFlags, Module, DevicePointer, DeviceBuffer, CopyDestination, launch}; 
 
 #[doc(hidden)]
 pub struct Hipblas {
@@ -147,7 +156,7 @@ impl RocmGpuBase {
     fn stream(&self) -> &Stream { 
         &self.stream
     }
-    fn kernels(&self) -> &Module {
+    fn kernels(&self) -> &Module {    
         &self.kernels
     }
     fn hipblas(&self) -> &Hipblas {
@@ -169,15 +178,20 @@ pub struct RocmGpu {
 }
 
 impl RocmGpu {
-    pub fn new(index: usize) -> Arc<Self> {    
+    pub fn new(index: usize) -> Arc<Self> {  
+        init(HipFlags::empty())
+            .expect("Failed to initialize HIP!"); 
         let device = RocmDevice::get_device(index as u32)
-            .expect(&format!("RocmGpu unable to get device {}!", index));
+            .expect(&format!("RocmGpu unable to get device {}!", index));        
         let context = Context::create_and_push(ContextFlags::empty(), device)
             .expect("Unable to create Rocm Context!");
         let stream = Stream::new(StreamFlags::empty(), Some(0))
             .expect("Unable to create Rocm Stream!");
-        let src = CString::new(include_str!("rocm/kernels.s")).unwrap();
-        let kernels = Module::load_from_string(&src).unwrap();
+        let src = unsafe {
+            CStr::from_bytes_with_nul_unchecked(include_bytes!("rocm/kernels.hsaco"))
+        };
+        let kernels = Module::load_from_string(src)
+            .expect("Unable to load kernels!");
         let hipblas = Hipblas::with_stream(&stream)
             .expect("Unable to create Hipblas!");
         let miopen = Miopen::with_stream(&stream)
@@ -231,38 +245,66 @@ pub struct RocmBuffer<T: Num> {
 
 impl<T: Num> RocmBuffer<T> {
     pub(super) unsafe fn uninitialized(gpu: &Arc<RocmGpu>, len: usize) -> Self {
-        gpu.lock()
+        let _gpu = gpu.lock()
             .unwrap();
         let data = DeviceBuffer::uninitialized(len).unwrap();
         let gpu = gpu.clone();
         Self { data, gpu }
     }
     pub(super) fn fill(&mut self, elem: T) {
-        self.gpu.lock()
-            .unwrap();
-        let p = unsafe { self.data.as_mut_ptr() as *mut c_void };
-        let len = self.data.len();
-        let status = if TypeId::of::<T>() == TypeId::of::<u8>() {
+        fn fill_u8(gpu: &RocmGpu, y: *mut u8, elem: u8, len: u32) {
+            let gpu = gpu.lock()
+                .unwrap();
+            let stream = gpu.stream();
+            let module = gpu.kernels();
+            let (nblocks, nthreads) = get_nblocks_nthreads(len);
             unsafe {
-                hipMemsetD8(
-                    p,
-                    std::mem::transmute(elem.to_u8().unwrap()), // u8
-                    len,
-                )
+                launch!(module.fill_u8<<<nblocks, nthreads, 0, stream>>>(
+                    DevicePointer::wrap(y),
+                    elem,
+                    len
+                )).unwrap();
             }
-        } else if TypeId::of::<T>() == TypeId::of::<f32>() {
+        }
+        
+        fn fill_u32(gpu: &RocmGpu, y: *mut u32, elem: u32, len: u32) {
+            let gpu = gpu.lock()
+                .unwrap();
+            let stream = gpu.stream();
+            let module = gpu.kernels();
+            let (nblocks, nthreads) = get_nblocks_nthreads(len);
             unsafe {
-                hipMemsetD32(
-                    p,
-                    std::mem::transmute(elem.to_f32().unwrap()), // u32
-                    len,
-                )
+                launch!(module.fill_u32<<<nblocks, nthreads, 0, stream>>>(
+                    DevicePointer::wrap(y),
+                    elem,
+                    len
+                )).unwrap();
             }
-        } else {
+        }
+        
+        if TypeId::of::<T>() == TypeId::of::<u8>() {
+            unsafe {    
+                fill_u8(
+                    &self.gpu, 
+                    self.data.as_mut_ptr() as *mut u8,
+                    elem.to_u8().unwrap(),
+                    self.data.len() as u32
+                ) 
+            }
+        }
+        else if TypeId::of::<T>() == TypeId::of::<f32>() {
+            unsafe {    
+                fill_u32(
+                    &self.gpu, 
+                    self.data.as_mut_ptr() as *mut u32,
+                    std::mem::transmute(elem.to_f32().unwrap()),
+                    self.data.len() as u32
+                ) 
+            }
+        }
+        else {
             unreachable!()
-        };
-        status.into_result()
-            .unwrap();
+        }
     }
     pub(super) fn len(&self) -> usize {
         self.data.len()
@@ -328,47 +370,68 @@ impl TensorDescriptor {
         };
         status.into_result()
             .unwrap();
-        
             
         let dim = dim.into_dimension();
-        let strides = strides.map_or(
-            dim.default_strides(),
-            |strides| {
-                let strides = strides.into_dimension();
-                assert_eq!(dim.ndim(), strides.ndim());
-                strides
+        
+        if strides.is_none() && dim.ndim() <= 4 {
+            let [n, c, h, w] = match dim.slice() {
+                &[n, c, h, w] => [n as i32, c as i32, h as i32, w as i32],
+                &[n, c, h] => [n as i32, c as i32, h as i32, 1],
+                &[n, c] => [n as i32, c as i32, 1, 1],
+                &[c] => [1, c as i32, 1, 1],
+                &[] => [1, 1, 1, 1],
+                _ => unreachable!()
+            };
+            unsafe {
+                miopenSet4dTensorDescriptor(
+                    tensor_descriptor,
+                    data_type, 
+                    n, c, h, w
+                ).into_result()
+                    .unwrap();
             }
-        );
+        }
+        else {
+            panic!();
+            let strides = strides.map_or(
+                dim.default_strides(),
+                |strides| {
+                    let strides = strides.into_dimension();
+                    assert_eq!(dim.ndim(), strides.ndim());
+                    strides
+                }
+            );
 
-        let ndim = dim.ndim();
-        
-        let mut _dim = [0i32; 6];
-        let mut _strides = [0i32; 6];
-        
-        dim.slice()
-            .into_iter()
-            .zip(strides.slice())
-            .zip(
-                _dim.iter_mut()
-                    .zip(_strides.iter_mut())
-            )
-            .for_each(|((d, s), (_d, _s))| {
-                *_d = *d as i32;
-                *_s = *s as i32;
-            });
+            let ndim = dim.ndim();
             
-        
-        let status = unsafe {
-            miopenSetTensorDescriptor(
-                tensor_descriptor,
-                data_type,
-                ndim as i32,
-                _dim.as_ptr() as *mut i32,
-                _strides.as_ptr() as *mut i32
-            )
-        };
-        status.into_result()
-            .unwrap();
+            let mut _dim = [0i32; 6];
+            let mut _strides = [0i32; 6];
+            
+            dim.slice()
+                .into_iter()
+                .zip(strides.slice())
+                .zip(
+                    _dim.iter_mut()
+                        .zip(_strides.iter_mut())
+                )
+                .for_each(|((d, s), (_d, _s))| {
+                    *_d = *d as i32;
+                    *_s = *s as i32;
+                });
+                
+            
+            let status = unsafe {
+                miopenSetTensorDescriptor(
+                    tensor_descriptor,
+                    data_type,
+                    ndim as i32,
+                    _dim.as_ptr() as *mut i32,
+                    _strides.as_ptr() as *mut i32
+                )
+            };
+            status.into_result()
+                .unwrap();
+        }
         Self { tensor_descriptor }
     }
     unsafe fn as_mut_ptr(&self) -> miopenTensorDescriptor_t {
@@ -439,6 +502,26 @@ impl Drop for ConvolutionDescriptor {
         let status = unsafe { miopenDestroyConvolutionDescriptor(self.convolution_descriptor) };
         status.into_result()
             .unwrap();
+    }
+}
+
+// TODO: Potentially upstream to miopen-sys
+// this might be fixed with bindgen
+trait ConvAlgoPerfExt {
+    unsafe fn fwd_algo(&self) -> miopenConvFwdAlgorithm_t;
+    unsafe fn bwd_data_algo(&self) -> miopenConvBwdDataAlgorithm_t;
+    unsafe fn bwd_weights_algo(&self) -> miopenConvBwdWeightsAlgorithm_t;
+}
+
+impl ConvAlgoPerfExt for miopenConvAlgoPerf_t {
+    unsafe fn fwd_algo(&self) -> miopenConvFwdAlgorithm_t {
+        self.__bindgen_anon_1.fwd_algo
+    }
+    unsafe fn bwd_data_algo(&self) -> miopenConvBwdDataAlgorithm_t {
+        self.__bindgen_anon_1.bwd_data_algo
+    }
+    unsafe fn bwd_weights_algo(&self) -> miopenConvBwdWeightsAlgorithm_t {
+        self.__bindgen_anon_1.bwd_weights_algo
     }
 }
 
@@ -553,6 +636,39 @@ impl Drop for PoolingDescriptor {
         };
         status.into_result()
             .unwrap();
+    }
+}
+
+struct FusionPlanDescriptor {
+    fusion_plan_descriptor: miopenFusionPlanDescriptor_t
+}
+
+impl FusionPlanDescriptor {
+    fn new(direction: miopenFusionDirection_t, input_desc: &TensorDescriptor) -> Self {
+        let mut fusion_plan_descriptor: miopenFusionPlanDescriptor_t = std::ptr::null_mut();
+        unsafe {
+            miopenCreateFusionPlan(
+                &mut fusion_plan_descriptor as *mut miopenFusionPlanDescriptor_t,
+                direction,
+                input_desc.as_mut_ptr()
+            ).into_result()
+                .unwrap();
+        }
+        Self { fusion_plan_descriptor }
+    } 
+    unsafe fn as_mut_ptr(&self) -> miopenFusionPlanDescriptor_t {
+        self.fusion_plan_descriptor
+    }
+}
+
+impl Drop for FusionPlanDescriptor {
+    fn drop(&mut self) {
+        unsafe {
+            miopenDestroyFusionPlan(
+                self.fusion_plan_descriptor
+            ).into_result()
+                .unwrap()
+        }
     }
 }
 
@@ -996,6 +1112,7 @@ pub(super) fn cross_entropy_backward<
     }
 }
 
+/*
 fn reverse_conv2d_filter(input: &TensorView4<f32>, beta: f32, output: &mut TensorViewMut4<f32>) {
     let gpu = input.device()
         .rocm()
@@ -1020,7 +1137,7 @@ fn reverse_conv2d_filter(input: &TensorView4<f32>, beta: f32, output: &mut Tenso
         ))
         .unwrap()
     }
-}
+}*/
 
 pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     input: &TensorBase<S1, Ix4>,
@@ -1040,94 +1157,101 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     let w = weight.as_rocm_ptr().unwrap();
     let y_desc = TensorDescriptor::new(output.raw_dim(), None, miopenDataType_t::miopenFloat);
     let y = output.as_mut_rocm_ptr().unwrap();
-    let conv2d_desc = ConvolutionDescriptor::new(
-        args, 
-        miopenConvolutionMode_t::miopenConvolution
-    );
-
-    let mut solution: miopenConvSolution_t = unsafe { std::mem::uninitialized() };
-    let mut ret_solution_count = 0usize;
-    let max_solution_count = 1usize;
     
-    let status = unsafe {
-        miopenConvolutionForwardGetSolution(
-            miopen.as_mut_ptr(),
-            w_desc.as_mut_ptr(),
-            x_desc.as_mut_ptr(),
-            conv2d_desc.as_mut_ptr(),
-            y_desc.as_mut_ptr(),
-            max_solution_count,
-            &mut ret_solution_count as *mut usize,
-            &mut solution as *mut _
-        )
-    };
-    status.into_result()
-        .expect("Unable to get ConvolutionForward Solution!");
-    assert_eq!(ret_solution_count, 1);
-    
-    let mut workspace_size = 0usize;
-    
-    let status = unsafe {
-        miopenConvolutionForwardGetSolutionWorkspaceSize(
-            miopen.as_mut_ptr(),
-            w_desc.as_mut_ptr(),
-            x_desc.as_mut_ptr(),
-            conv2d_desc.as_mut_ptr(),
-            y_desc.as_mut_ptr(),
-            solution.solution_id,
-            &mut workspace_size as *mut usize
-        )
-    };
-    status.into_result()
-        .expect("Unable to get ConvolutionForward workspace size!");
+    {
+        let conv2d_desc = ConvolutionDescriptor::new(
+            args, 
+            miopenConvolutionMode_t::miopenConvolution
+        );
         
-    let mut workspace = unsafe {
-        DeviceBuffer::uninitialized(workspace_size)
-            .expect("Unable to allocate workspace!")
-    };
-    
-    let status = unsafe {
-        miopenConvolutionForwardImmediate(
-            miopen.as_mut_ptr(),
-            w_desc.as_mut_ptr(),
-            w as *const _,
-            x_desc.as_mut_ptr(),
-            x as *const _,
-            conv2d_desc.as_mut_ptr(),
-            y_desc.as_mut_ptr(),
-            y as *mut _,
-            workspace.as_mut_ptr(),
-            workspace_size,
-            solution.solution_id
-        )
-    };
-    status.into_result()
-        .expect("Unable to execute ConvolutionForwardImmediate!");
+        let mut workspace_size: usize = 0;
+        
+        unsafe {
+            miopenConvolutionForwardGetWorkSpaceSize(
+                miopen.as_mut_ptr(),
+                w_desc.as_mut_ptr(),
+                x_desc.as_mut_ptr(),
+                conv2d_desc.as_mut_ptr(),
+                y_desc.as_mut_ptr(),
+                &mut workspace_size as *mut usize
+            ).into_result()
+                .unwrap();
+        }
+        
+        let mut workspace = unsafe {
+            DeviceBuffer::<u8>::uninitialized(workspace_size)
+                .unwrap()
+        };
+        
+        let mut perf: miopenConvAlgoPerf_t = unsafe { std::mem::uninitialized() };
+        let requested_count = 1;
+        let mut returned_count = 0i32;
+        let exhaustive = true;
+        
+        unsafe {
+            miopenFindConvolutionForwardAlgorithm(
+                miopen.as_mut_ptr(),
+                x_desc.as_mut_ptr(),
+                x as *const _,
+                w_desc.as_mut_ptr(),
+                w as *const _,
+                conv2d_desc.as_mut_ptr(),
+                y_desc.as_mut_ptr(),
+                y as *mut _,
+                requested_count,
+                &mut returned_count as *mut _,
+                &mut perf as *mut miopenConvAlgoPerf_t,
+                workspace.as_mut_ptr() as *mut _,
+                workspace_size,
+                exhaustive
+            ).into_result()
+                .unwrap();
+        }
+        assert_eq!(returned_count, 1);
+        
+        let algo = unsafe { perf.fwd_algo() };
+        
+        unsafe {
+            miopenConvolutionForward(
+                miopen.as_mut_ptr(),
+                &1f32 as *const f32 as *const _,
+                x_desc.as_mut_ptr(),
+                x as *const _,
+                w_desc.as_mut_ptr(),
+                w as *const _,
+                conv2d_desc.as_mut_ptr(),
+                algo,
+                &0f32 as *const f32 as *const _,
+                y_desc.as_mut_ptr(),
+                y as *mut _,
+                workspace.as_mut_ptr() as *mut _,
+                workspace_size
+            ).into_result()
+                .unwrap();
+        }
+    }    
     
     if let Some(bias) = bias {
         let b_desc = TensorDescriptor::new(
-            [1, bias.dim()], 
+            bias.raw_dim(),
             None, 
             miopenDataType_t::miopenFloat
         ); 
         let b = bias.as_rocm_ptr().unwrap();
         
-        let alpha = 1f32;
-        let beta = 1f32;
-        
         let status = unsafe {
             miopenConvolutionForwardBias(
                 miopen.as_mut_ptr(),
-                &alpha as *const f32 as *const _,
+                &1f32 as *const f32 as *const _,
                 b_desc.as_mut_ptr(),
                 b as *const _,
-                &beta as *const f32 as *const _,
+                &1f32 as *const f32 as *const _,
                 y_desc.as_mut_ptr(),
                 y as *mut _
             )
         };
         status.into_result()
-            .expect("Unable to execute ConvolutionForwardBias!");
+            .unwrap();
     }
 }
 
@@ -1137,206 +1261,218 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
     args: &Conv2dArgs,
     output_grad: &TensorView4<f32>,
 ) {
-    let dx_desc = TensorDescriptor::new(input_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
-    let dx = input_grad.as_mut_rocm_ptr().unwrap();
-    /*let weight = {
-        // Patch cudnn behavior by reversing filter order ie per patch
-        // for kernel of shape (1, 1, 2, 2) and data = vec![1., 2., 3., 4.]
-        // output = vec![4., 3., 2., 1.]
-        let mut weight_reversed =
-            unsafe { Tensor::uninitialized(&weight.device, weight.raw_dim()) };
-        reverse_conv2d_filter(&weight.view(), 0., &mut weight_reversed.view_mut());
-        weight_reversed
-    };*/
-    let gpu = weight.device()
-        .rocm()
-        .unwrap()
-        .lock()
-        .unwrap();
-    let miopen = gpu.miopen();
-    let w_desc = TensorDescriptor::new(weight.raw_dim(), None, miopenDataType_t::miopenFloat);
-    let w = weight.as_rocm_ptr().unwrap();
-    let dy_desc = TensorDescriptor::new(output_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
-    let dy = output_grad.as_rocm_ptr().unwrap();
-    let mut conv2d_desc = ConvolutionDescriptor::new(args, miopenConvolutionMode_t::miopenConvolution);
-    
-    let mut solution: miopenConvSolution_t = unsafe { std::mem::uninitialized() };
-    let mut ret_solution_count = 0usize;
-    let max_solution_count = 1usize;
-    
-    let status = unsafe {
-        miopenConvolutionBackwardDataGetSolution(
-            miopen.as_mut_ptr(),
-            w_desc.as_mut_ptr(),
-            dy_desc.as_mut_ptr(),
-            conv2d_desc.as_mut_ptr(),
-            dx_desc.as_mut_ptr(),
-            max_solution_count,
-            &mut ret_solution_count as *mut usize,
-            &mut solution as *mut _
-        )
-    };
-    status.into_result()
-        .expect("Unable to get ConvolutionBackwardData Solution!");
-    assert_eq!(ret_solution_count, 1);
-    
-    let mut workspace_size = 0usize;
-    
-    let status = unsafe {
-        miopenConvolutionBackwardDataGetSolutionWorkspaceSize(
-            miopen.as_mut_ptr(),
-            w_desc.as_mut_ptr(),
-            dy_desc.as_mut_ptr(),
-            conv2d_desc.as_mut_ptr(),
-            dx_desc.as_mut_ptr(),
-            solution.solution_id,
-            &mut workspace_size as *mut usize
-        )
-    };
-    status.into_result()
-        .expect("Unable to get ConvolutionBackwardData workspace size!");
+    let mut input_grad_tmp = unsafe { Tensor::uninitialized(input_grad.device(), input_grad.raw_dim()) };
+    {
+        let gpu = weight.device()
+            .rocm()
+            .unwrap()
+            .lock()
+            .unwrap();
+        let miopen = gpu.miopen();
+        let dx_desc = TensorDescriptor::new(input_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
+        let dx = input_grad_tmp.as_mut_rocm_ptr().unwrap();
+        let w_desc = TensorDescriptor::new(weight.raw_dim(), None, miopenDataType_t::miopenFloat);
+        let w = weight.as_rocm_ptr().unwrap();
+        let dy_desc = TensorDescriptor::new(output_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
+        let dy = output_grad.as_rocm_ptr().unwrap();
+        let mut conv2d_desc = ConvolutionDescriptor::new(args, miopenConvolutionMode_t::miopenConvolution);
         
-    let mut workspace = unsafe {
-        DeviceBuffer::uninitialized(workspace_size)
-            .expect("Unable to allocate workspace!")
-    };
-    
-    let status = unsafe {
-        miopenConvolutionBackwardDataImmediate(
-            miopen.as_mut_ptr(),
-            w_desc.as_mut_ptr(),
-            w as *const _,
-            dy_desc.as_mut_ptr(),
-            dy as *const _,
-            conv2d_desc.as_mut_ptr(),
-            dx_desc.as_mut_ptr(),
-            dx as *mut _,
-            workspace.as_mut_ptr(),
-            workspace_size,
-            solution.solution_id
-        )
-    };
-    status.into_result()
-        .expect("Unable to execute ConvolutionBackwardDataImmediate!");
+        let mut workspace_size: usize = 0;
+        
+        unsafe {
+            miopenConvolutionBackwardDataGetWorkSpaceSize(
+                miopen.as_mut_ptr(),
+                dy_desc.as_mut_ptr(),
+                w_desc.as_mut_ptr(),
+                conv2d_desc.as_mut_ptr(),
+                dx_desc.as_mut_ptr(),
+                &mut workspace_size as *mut usize
+            ).into_result()
+                .unwrap();
+        }
+        
+        let mut workspace = unsafe {
+            DeviceBuffer::<u8>::uninitialized(workspace_size)
+                .unwrap()
+        };
+        
+        let mut perf: miopenConvAlgoPerf_t = unsafe { std::mem::uninitialized() };
+        let requested_count = 1;
+        let mut returned_count = 0i32;
+        let exhaustive = true;
+        
+        unsafe {
+            miopenFindConvolutionBackwardDataAlgorithm(
+                miopen.as_mut_ptr(),
+                dy_desc.as_mut_ptr(),
+                dy as *const _,
+                w_desc.as_mut_ptr(),
+                w as *const _,
+                conv2d_desc.as_mut_ptr(),
+                dx_desc.as_mut_ptr(),
+                dx as *mut _,
+                requested_count,
+                &mut returned_count as *mut _,
+                &mut perf as *mut miopenConvAlgoPerf_t,
+                workspace.as_mut_ptr() as *mut _,
+                workspace_size,
+                exhaustive
+            ).into_result()
+                .unwrap();
+        }
+        assert_eq!(returned_count, 1);
+            
+        let algo = unsafe { perf.bwd_data_algo() };
+        
+        unsafe {
+            miopenConvolutionBackwardData(
+                miopen.as_mut_ptr(),
+                &1f32 as *const f32 as *const _,
+                dy_desc.as_mut_ptr(),
+                dy as *const _,
+                w_desc.as_mut_ptr(),
+                w as *const _,
+                conv2d_desc.as_mut_ptr(),
+                algo,
+                &0f32 as *const f32 as *const _,
+                dx_desc.as_mut_ptr(),
+                dx as *mut _,
+                workspace.as_mut_ptr() as *mut _,
+                workspace_size
+            ).into_result()
+                .unwrap();
+        }
+    }
+    input_grad.scaled_add(1., &input_grad_tmp.view());
 }
 
 pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
     input: &TensorBase<S1, Ix4>,
     weight_grad: &mut TensorViewMut4<f32>,
-    bias_grad: Option<&mut TensorViewMut1<f32>>,
+    mut bias_grad: Option<&mut TensorViewMut1<f32>>,
     args: &Conv2dArgs,
     output_grad: &TensorView4<f32>,
 ) {
-    let mut weight_grad_reversed = Tensor::zeros(weight_grad.device(), weight_grad.raw_dim());
-    
-    let gpu = input.device()
-        .rocm()
-        .unwrap()
-        .lock()
-        .unwrap();
-    let miopen = gpu.miopen();
-    let x_desc = TensorDescriptor::new(input.raw_dim(), None, miopenDataType_t::miopenFloat);
-    let x = input.as_rocm_ptr().unwrap();
-    let dw_desc = TensorDescriptor::new(weight_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
-    let dw = weight_grad_reversed.as_mut_rocm_ptr().unwrap();
-    let dy_desc = TensorDescriptor::new(output_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
-    let dy = output_grad.as_rocm_ptr().unwrap();
-    let conv2d_desc = ConvolutionDescriptor::new(args, miopenConvolutionMode_t::miopenConvolution);
-    
-    
-    let mut solution: miopenConvSolution_t = unsafe { std::mem::uninitialized() };
-    let mut ret_solution_count = 0usize;
-    let max_solution_count = 1usize;
-    
-    let status = unsafe {
-        miopenConvolutionBackwardWeightsGetSolution(
-            miopen.as_mut_ptr(),
-            dy_desc.as_mut_ptr(),
-            x_desc.as_mut_ptr(),
-            conv2d_desc.as_mut_ptr(),
-            dw_desc.as_mut_ptr(),
-            max_solution_count,
-            &mut ret_solution_count as *mut usize,
-            &mut solution as *mut _
-        )
-    };
-    status.into_result()
-        .expect("Unable to get ConvolutionBackwardWeights solution!");
-    assert_eq!(ret_solution_count, 1);
-    
-    let mut workspace_size = 0usize;
-    
-    let status = unsafe {
-        miopenConvolutionBackwardWeightsGetSolutionWorkspaceSize(
-            miopen.as_mut_ptr(),
-            dy_desc.as_mut_ptr(),
-            x_desc.as_mut_ptr(),
-            conv2d_desc.as_mut_ptr(),
-            dw_desc.as_mut_ptr(),
-            solution.solution_id,
-            &mut workspace_size as *mut usize
-        )
-    };
-    status.into_result()
-        .expect("Unable to get ConvolutionBackwardWeights workspace size!");
+    let mut weight_grad_tmp = unsafe { Tensor::uninitialized(weight_grad.device(), weight_grad.raw_dim()) };
+    let mut bias_grad_tmp = bias_grad.as_mut()
+        .map(|bias_grad| unsafe { 
+            Tensor::uninitialized(bias_grad.device(), bias_grad.raw_dim())
+         });
+    {
+        let gpu = input.device()
+            .rocm()
+            .unwrap()
+            .lock()
+            .unwrap();
+        let miopen = gpu.miopen();
+        let x_desc = TensorDescriptor::new(input.raw_dim(), None, miopenDataType_t::miopenFloat);
+        let x = input.as_rocm_ptr().unwrap();
+        let dw_desc = TensorDescriptor::new(weight_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
+        let dw = weight_grad_tmp.as_mut_rocm_ptr().unwrap();
+        let dy_desc = TensorDescriptor::new(output_grad.raw_dim(), None, miopenDataType_t::miopenFloat);
+        let dy = output_grad.as_rocm_ptr().unwrap();
         
-    let mut workspace = unsafe {
-        DeviceBuffer::uninitialized(workspace_size)
-            .expect("Unable to allocate workspace!")
-    };
-    
-    let status = unsafe {
-        miopenConvolutionBackwardWeightsImmediate(
-            miopen.as_mut_ptr(),
-            dy_desc.as_mut_ptr(),
-            dy as *const _,
-            x_desc.as_mut_ptr(),
-            x as *const _,
-            conv2d_desc.as_mut_ptr(),
-            dw_desc.as_mut_ptr(),
-            dw as *mut _,
-            workspace.as_mut_ptr(),
-            workspace_size,
-            solution.solution_id
-        )
-    };
-    status.into_result()
-        .expect("Unable to execute ConvolutionBackwardWeightsImmediate!");
+        {
+            let conv2d_desc = ConvolutionDescriptor::new(args, miopenConvolutionMode_t::miopenConvolution);
         
-    if let Some(bias_grad) = bias_grad {
-        let db_desc = TensorDescriptor::new(
-            [1, bias_grad.dim()],
-            None,
-            miopenDataType_t::miopenFloat
-        );
-        let db = bias_grad.as_mut_rocm_ptr().unwrap();
-        
-        let alpha = 1f32;
-        let beta = 1f32;
-        
-        let status = unsafe {
-            miopenConvolutionBackwardBias(
-                miopen.as_mut_ptr(),
-                &alpha as *const f32 as *const _,
-                dy_desc.as_mut_ptr(),
-                dy as *const _,
-                &beta as *const f32 as *const _,
-                db_desc.as_mut_ptr(),
-                db as *mut f32 as *mut _
-            )
-        };
-        status.into_result()
-            .expect("Unable to execute ConvolutionBackwardBias!");
+            let mut workspace_size: usize = 0;
+            
+            unsafe {
+                miopenConvolutionBackwardWeightsGetWorkSpaceSize(
+                    miopen.as_mut_ptr(),
+                    dy_desc.as_mut_ptr(),
+                    x_desc.as_mut_ptr(),
+                    conv2d_desc.as_mut_ptr(),
+                    dw_desc.as_mut_ptr(),
+                    &mut workspace_size as *mut usize
+                ).into_result()
+                    .unwrap();
+            }
+            
+            let mut workspace = unsafe {
+                DeviceBuffer::<u8>::uninitialized(workspace_size)
+                    .unwrap()
+            };
+            
+            let mut perf: miopenConvAlgoPerf_t = unsafe { std::mem::uninitialized() };
+            let requested_count = 1;
+            let mut returned_count = 0i32;
+            let exhaustive = true;
+            
+            unsafe {
+                miopenFindConvolutionBackwardWeightsAlgorithm(
+                    miopen.as_mut_ptr(),
+                    dy_desc.as_mut_ptr(),
+                    dy as *const _,
+                    x_desc.as_mut_ptr(),
+                    x as *const _,
+                    conv2d_desc.as_mut_ptr(),
+                    dw_desc.as_mut_ptr(),
+                    dw as *mut _,
+                    requested_count,
+                    &mut returned_count as *mut _,
+                    &mut perf as *mut miopenConvAlgoPerf_t,
+                    workspace.as_mut_ptr() as *mut _,
+                    workspace_size,
+                    exhaustive
+                ).into_result()
+                    .unwrap();
+            }
+            assert_eq!(returned_count, 1);
+                
+            let algo = unsafe { perf.bwd_weights_algo() };
+            
+            unsafe {
+                miopenConvolutionBackwardWeights(
+                    miopen.as_mut_ptr(),
+                    &1f32 as *const f32 as *const _,
+                    dy_desc.as_mut_ptr(),
+                    dy as *const _,
+                    x_desc.as_mut_ptr(),
+                    x as *const _,
+                    conv2d_desc.as_mut_ptr(),
+                    algo,
+                    &0f32 as *const f32 as *const _,
+                    dw_desc.as_mut_ptr(),
+                    dw as *mut _,
+                    workspace.as_mut_ptr() as *mut _,
+                    workspace_size
+                ).into_result()
+                    .unwrap();
+            }
+        }
+            
+        if let Some(bias_grad) = &mut bias_grad_tmp {
+            let db_desc = TensorDescriptor::new(
+                bias_grad.raw_dim(),
+                None,
+                miopenDataType_t::miopenFloat
+            );
+            let db = bias_grad.as_mut_rocm_ptr().unwrap();
+            
+            let status = unsafe {
+                miopenConvolutionBackwardBias(
+                    miopen.as_mut_ptr(),
+                    &1f32 as *const f32 as *const _,
+                    dy_desc.as_mut_ptr(),
+                    dy as *const _,
+                    &0f32 as *const f32 as *const _,
+                    db_desc.as_mut_ptr(),
+                    db as *mut f32 as *mut _
+                )
+            };
+            status.into_result()
+                .unwrap();
+        }
     }
-    
-    std::mem::drop(gpu);
-    
-    // apply reversed filter back to weight_grad
-    reverse_conv2d_filter(
-        &weight_grad_reversed.view(),
-        1.,
-        &mut weight_grad.view_mut(),
-    );
+    weight_grad.scaled_add(1., &weight_grad_tmp.view());
+    match (bias_grad, bias_grad_tmp) {
+        (Some(bias_grad), Some(bias_grad_tmp)) => {
+            bias_grad.scaled_add(1., &bias_grad_tmp.view());
+        },
+        (None, None) => (),
+        _ => unreachable!()
+    }
 }
 
 pub(super) fn max_pool2d_forward<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
@@ -1353,7 +1489,7 @@ pub(super) fn max_pool2d_forward<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32
     let miopen = gpu.miopen();
     let x_desc = TensorDescriptor::new(input.raw_dim(), None, miopenDataType_t::miopenFloat);
     let x = input.as_rocm_ptr().unwrap();
-    let y_desc = TensorDescriptor::new(output.dim.slice(), None, miopenDataType_t::miopenFloat);
+    let y_desc = TensorDescriptor::new(output.raw_dim(), None, miopenDataType_t::miopenFloat);
     let y = output.as_mut_rocm_ptr().unwrap();
     let pool2d_desc = PoolingDescriptor::new(args, miopenPoolingMode_t::miopenPoolingMax);
     
@@ -1446,7 +1582,6 @@ pub(super) fn max_pool2d_backward<
     };
     status.into_result()
         .unwrap();
-
 }
 
 pub(super) fn sgd_with_momentum<S1: DataMut<Elem=f32>, S2: DataRef<Elem=f32>, S3: DataMut<Elem=f32>, D: Dimension>

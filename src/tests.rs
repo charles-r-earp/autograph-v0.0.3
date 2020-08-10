@@ -199,7 +199,6 @@ fn test_gemm_mkn(m: usize, k: usize, n: usize, device: impl Into<Device>) {
         .into_iter()
         .map(|x| x.to_f32().unwrap())
         .collect();
-
     {
         // MxK * KxN
         let x1 = Tensor::from_shape_vec(&device, [m, k], &vec1);
@@ -255,7 +254,7 @@ fn test_gemm_cpu() {
 fn test_gemm_cuda() {
     test_gemm(CudaGpu::new(0));
 }
-#[cfg(feature = "cuda")]
+#[cfg(feature = "rocm")]
 #[test]
 fn test_gemm_rocm() {
     test_gemm(RocmGpu::new(0));
@@ -288,7 +287,7 @@ fn test_relu(device: impl Into<Device>) {
     let x = Tensor::from_shape_vec(&device, 6, vec![-0.1, -100., 0.0, 0.1, 1., 100.]);
     let y = x.relu();
     let y_vec = y.as_slice().into_owned();
-    debug_assert_eq!(y_vec, vec![0., 0., 0., 0.1, 1., 100.]);
+    assert_eq!(y_vec, vec![0., 0., 0., 0.1, 1., 100.]);
 }
 #[test]
 fn test_relu_cpu() {
@@ -526,6 +525,7 @@ fn test_cross_entropy_backward_cuda() {
 fn test_cross_entropy_backward_rocm() {
     test_cross_entropy_backward(RocmGpu::new(0));
 }
+const CONV_MAX_RELATIVE: f32 = 0.000001;
 fn test_conv2d_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,
     outputs: usize,
@@ -600,13 +600,7 @@ fn test_conv2d_with_args(
     };
     let mut output_true_vec = vec![0f32; output_vec.len()];
     output_true.copy_data(&mut output_true_vec, output_vec.len());
-    compare_vectors(
-        &output_vec,
-        &output_true_vec,
-        batch_size,
-        inputs * kh * kw,
-        outputs,
-    );
+    approx::relative_eq!(output_vec.as_slice(), output_true_vec.as_slice(), max_relative=CONV_MAX_RELATIVE);
 }
 fn test_conv2d(device: impl Into<Device>) {
     let device = device.into();
