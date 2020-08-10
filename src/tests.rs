@@ -117,7 +117,7 @@ fn test_fill_f32_cuda() {
 }
 #[cfg(feature = "rocm")]
 #[test]
-fn test_fill_f32_() {
+fn test_fill_f32_rocm() {
     test_fill_f32(RocmGpu::new(0));
 }
 fn test_broadcast(device: impl Into<Device>) {

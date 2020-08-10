@@ -1139,6 +1139,8 @@ fn reverse_conv2d_filter(input: &TensorView4<f32>, beta: f32, output: &mut Tenso
     }
 }*/
 
+const EXHAUSTIVE: bool = cfg!(feature = "exhaustive");
+
 pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     input: &TensorBase<S1, Ix4>,
     weight: &TensorView4<f32>,
@@ -1186,7 +1188,7 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
         let mut perf: miopenConvAlgoPerf_t = unsafe { std::mem::uninitialized() };
         let requested_count = 1;
         let mut returned_count = 0i32;
-        let exhaustive = true;
+        let exhaustive = EXHAUSTIVE;
         
         unsafe {
             miopenFindConvolutionForwardAlgorithm(
@@ -1299,7 +1301,7 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
         let mut perf: miopenConvAlgoPerf_t = unsafe { std::mem::uninitialized() };
         let requested_count = 1;
         let mut returned_count = 0i32;
-        let exhaustive = true;
+        let exhaustive = EXHAUSTIVE;
         
         unsafe {
             miopenFindConvolutionBackwardDataAlgorithm(
@@ -1397,7 +1399,7 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
             let mut perf: miopenConvAlgoPerf_t = unsafe { std::mem::uninitialized() };
             let requested_count = 1;
             let mut returned_count = 0i32;
-            let exhaustive = true;
+            let exhaustive = EXHAUSTIVE;
             
             unsafe {
                 miopenFindConvolutionBackwardWeightsAlgorithm(

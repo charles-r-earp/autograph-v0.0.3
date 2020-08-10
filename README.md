@@ -42,8 +42,9 @@ Tested on Ubuntu-18.04, Windows Server 2019, and macOS Catalina 10.15. Generally
 Cuda can be enabled by passing the feature "cuda" to cargo. CUDA https://developer.nvidia.com/cuda-downloads and cuDNN https://developer.nvidia.com/cudnn must be installed. See https://github.com/bheisler/RustaCUDA and https://github.com/charles-r-earp/cuda-cudnn-sys for additional information. 
 
 # ROCm 
-***under construction***
-Targets AMD GPU's. See prerequisites at (hip-sys https://github.com/charles-r-earp/hip-sys) and (miopen-sys https://github.com/charles-r-earp/miopen-sys). If you have MIOpen with HIP backend installed and running on your GPU (ie with Pytorch or TensorFlow), no additional setup should be necessary. 
+Targets AMD GPU's, pass the feature "rocm" to cargo. See prerequisites at (hip-sys https://github.com/charles-r-earp/hip-sys) and (miopen-sys https://github.com/charles-r-earp/miopen-sys). If you have MIOpen with HIP backend installed and running on your GPU (ie with Pytorch or TensorFlow), no additional setup should be necessary. 
+
+Note: You can additionally pass the feature "exhaustive" to enable exhaustive kernel search. This is only applicable to convolution functions, and will take a long time to run the first time for a particular set of parameters, but will be cached in ~/.config/miopen so future calls will not have to perform this search. Testing on an RX 580 did not show a significant difference, as the default implementation is often adequate. This is all experimental and the exhaustive search function is quite intrusive so potentially won't be included when this is merged. 
 
 # Datasets
 Autograph includes a datasets module enabled with the features datasets. This currently has the MNIST dataset, which is downloaded and saved automatically. The implementation of this is old and outdated (it uses reqwest among others which now uses async), and compiles slowly. Potentially overkill for such a small dataset, but for adding new datasets (like ImageNet), we will need an updated, fast implementation. The datasets module may be moved to its own crate in the future. 
@@ -96,7 +97,6 @@ cargo bench [--features "cuda rocm"]
 
 # Roadmap 
   - Residual Layers
-  - AMD / Rocm support
   - Datasets FashionMNIST, ImageNet, etc (potentially with a Dataset trait to enable shuffling, cropping, etc) 
   - Optimizers Adam (others?)
   - Loss functions Mean Squared Error / Binary Cross Entropy / L1 

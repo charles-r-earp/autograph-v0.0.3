@@ -44,6 +44,8 @@ derive = ["autograph_derive"]
 datasets = ["byteorder", "flate2", "reqwest"]
 cuda = ["rustacuda", "cuda-sys", "cuda-cudnn-sys"]
 rocm = ["hip-sys", "miopen-sys"]
+# rocm will run an exhaustive search for convolution functions, will take a long time on the first call to a given config
+exhaustive = []
 # dev use only!
 compile-kernels = []
 
