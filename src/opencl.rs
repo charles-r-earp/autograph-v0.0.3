@@ -318,20 +318,35 @@ pub(super) fn broadcast<T: Num, D: Dimension, S1: DataRef<Elem = T>, S2: DataMut
     input: &TensorBase<S1, D>,
     output: &mut TensorBase<S2, D::Larger>,
 ) {
-    let batch_size = output.raw_dim()[0];
-    let inputs = input.len();
+    let xpu = input.device.opencl().unwrap();
+    
+    let c = input.len();
     let x = input.as_ocl_buffer().unwrap();
+    let len = output.len();
     let y = output.as_mut_ocl_buffer().unwrap();
-    (0 .. batch_size)
-        .into_iter()
-        .for_each(|b| {
-            let dst_offset: usize = b * inputs;
-            unsafe {
-                x.copy(&y, Some(dst_offset), Some(inputs))
-                    .enq()
-                    .unwrap();
-            }
-        });
+    
+    let nthreads = 64;
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
+        nblocks += 1;
+    }
+    
+    let kernel = Kernel::builder()
+        .program(&xpu.program)
+        .name("broadcast")
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&x)
+        .arg(&y)
+        .arg(c as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq()
+            .unwrap();
+    }
 }
 
 pub(super) fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Dimension>(
@@ -339,52 +354,35 @@ pub(super) fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32
     output_grad: &TensorBase<S2, D::Larger>,
 ) {
     let xpu = output_grad.device.opencl().unwrap();
-    let batch_size = output_grad.raw_dim()[0];
     
-    let n = input_grad.len();
-    let alpha = 1f32;
-    let dy = output_grad.as_ocl_buffer().unwrap();
-    let incdy = 1;
+    let c = input_grad.len();
     let dx = input_grad.as_mut_ocl_buffer().unwrap();
-    let incdx = 1;
+    let len = output_grad.len();
+    let dy = output_grad.as_ocl_buffer().unwrap();
     
-    /*
     let nthreads = 64;
-    let mut nblocks = n / nthreads;
-    if n < nthreads || n % nthreads != 0 {
+    let mut nblocks = len / nthreads;
+    if len < nthreads || len % nthreads != 0 {
         nblocks += 1;
     }
     
-    (0 .. batch_size)
-        .into_iter()
-        .for_each(|b| {
-            let dy_offset: usize = b * n;
-            /*let dy = dy.create_sub_buffer(
-                Some(MemFlags::new().read_only()),
-                dy_offset,
-                n
-            ).unwrap();
-            let kernel = Kernel::builder()
-                .program(&gpu.program)
-                .name("axpy_f32")
-                .queue(gpu.queue.clone())
-                .global_work_size(nblocks * nthreads)
-                .local_work_size(nthreads)
-                .arg(n as u32)
-                .arg(alpha)
-                .arg(&dy)
-                .arg(incdy as u32)
-                .arg(&dx)
-                .arg(incdx as u32)
-                .build()
-                .unwrap();
-            unsafe {
-                kernel.enq()
-                    .unwrap();
-            }*/
-            let status = unsafe 
-        });*/
-    
+    let kernel = Kernel::builder()
+        .program(&xpu.program)
+        .name("broadcast_backward")
+        .queue(xpu.queue.clone())
+        .global_work_size(nblocks * nthreads)
+        .local_work_size(nthreads)
+        .arg(&dx)
+        .arg(&dy)
+        .arg(c as u32)
+        .arg(len as u32)
+        .build()
+        .unwrap();
+    unsafe {
+        kernel.enq()
+            .unwrap();
+    }
+    /*
     let offdx = 0;
     
     let mut command_queue = xpu.queue.as_ptr();
@@ -411,7 +409,7 @@ pub(super) fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32
             assert_eq!(status, CLBlastSuccess);
             
             xpu.synchronize();
-        });
+        });*/
 }
 
 impl Into<CLBlastTranspose> for Transpose {

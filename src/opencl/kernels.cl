@@ -22,6 +22,36 @@
     }
  }
  
+ __kernel void broadcast(__global const float* x, __global float* y, unsigned int c, unsigned int len) {
+    int tid = get_global_id(0); 
+    if (tid < len) {
+        y[tid] = x[tid % c];
+    }
+}
+
+// https://streamhpc.com/blog/2016-02-09/atomic-operations-for-floats-in-opencl-improved/
+void atomicAdd_g_f(volatile __global float *addr, float val)
+{
+    union {
+    unsigned int u32;
+    float f32;
+    } next, expected, current;
+    current.f32 = *addr;
+    do {
+    expected.f32 = current.f32;
+    next.f32 = expected.f32 + val;
+    current.u32 = atomic_cmpxchg( (volatile __global unsigned int *)addr,
+    expected.u32, next.u32);
+    } while( current.u32 != expected.u32 );
+}
+
+__kernel void broadcast_backward(__global float* dx, __global const float* dy, unsigned int c, unsigned int len) {
+    int tid = get_global_id(0);
+    if (tid < len) {
+        atomicAdd_g_f(&dx[tid % c], dy[tid]);
+    }
+}
+ 
  __kernel void cross_entropy_forward(unsigned int batch_size, unsigned int nclasses, __global const float* x, __global const float* t, __global float* y) {
     int tid = get_global_id(0);
     if (tid < batch_size) {
