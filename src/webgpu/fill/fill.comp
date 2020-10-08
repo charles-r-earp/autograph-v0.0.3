@@ -1,0 +1,17 @@
+
+layout(local_size_x = 1024) in;
+
+layout(set = 0, binding = 0) writeonly buffer Y {
+    T[] y;
+};
+
+layout(push_constant) uniform PushConsts {
+    T x;
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    y[index] = x;
+}
+
+

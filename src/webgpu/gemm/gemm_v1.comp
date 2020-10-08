@@ -1,0 +1,74 @@
+layout(local_size_x = M_TILE, local_size_y = N_TILE) in;
+
+layout(set = 0, binding = 0) readonly buffer A {
+    T[] a;
+};
+
+layout(set = 0, binding = 1) readonly buffer B {
+    T[] b;
+};
+
+layout(set = 0, binding = 2) restrict writeonly buffer C {
+    T[] c;
+};
+
+layout(push_constant) uniform PushConsts {
+    T alpha;
+    uint offa;
+    int rsa;
+    int csa;
+    uint offb;
+    int rsb;
+    int csb;
+    T beta;
+    uint offc;
+    int rsc;
+    int csc; 
+};
+
+shared T a_tile[M_TILE][K_TILE];
+shared T b_tile[K_TILE][N_TILE]; 
+
+void main() {
+    
+    uint global_x = gl_GlobalInvocationID.x;
+    uint global_y = gl_GlobalInvocationID.y;
+    uint local_x = gl_LocalInvocationID.x;
+    uint local_y = gl_LocalInvocationID.y;
+    
+    bool valid = global_x < M && global_y < N;
+    
+    T acc = 0;
+ 
+    uint tile_k;
+    #pragma unroll
+    for(uint k = 0; k < K; ++k) {
+        tile_k = (k + K_TILE) % K_TILE;  
+        if (tile_k == 0) {
+            if (global_x < M) {
+                a_tile[local_x][local_y] = a[global_x * rsa + (k + local_y) * csa + offa];
+            }    
+            
+            if (global_y < N) {    
+                b_tile[local_x][local_y] = b[(k + local_x) * rsb + global_y * csb + offb];
+            }
+            
+            memoryBarrierShared();
+        }
+        
+        if (valid) {
+            acc += a_tile[local_x][tile_k] * b_tile[tile_k][local_y];
+        }
+        
+        memoryBarrierShared();
+    } 
+    
+    if (valid) {
+        uint i = global_x * rsc + global_y * csc + offc;
+        #ifdef BETA 
+        c[i] = alpha * acc + beta * c[i]; 
+        #else
+        c[i] = alpha * acc;
+        #endif
+    }
+}

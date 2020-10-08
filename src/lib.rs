@@ -28,6 +28,10 @@ pub use cpu::Cpu;
 use cpu::CpuBuffer;
 
 #[doc(hidden)]
+pub mod webgpu;
+pub use webgpu::{WebGpu, WebBuffer, WebType};
+
+#[doc(hidden)]
 #[cfg(feature = "cuda")]
 pub mod cuda;
 #[cfg(feature = "cuda")]
@@ -63,7 +67,7 @@ impl<T: PrivateNum> DeviceCopy for T {}
 
 /// Num is a trait for all data types that Tensor can store, it cannot be implemented for additional types
 pub trait Num:
-    'static + Copy + DeviceCopy + Default + Zero + One + ToPrimitive + Bounded + PartialEq
+    'static + Copy + DeviceCopy + WebType + Default + Zero + One + ToPrimitive + Bounded + PartialEq
 {
 }
 
@@ -923,12 +927,12 @@ fn relu_backward<
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Transpose {
+pub enum Transpose {
     No,
     Yes,
 }
 
-fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32>>(
+pub fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32>>(
     alpha: f32,
     a: &TensorBase<S1, Ix2>,
     trans_a: Transpose,
