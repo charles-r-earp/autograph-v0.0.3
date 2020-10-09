@@ -153,7 +153,7 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
             csc
         }];
         
-        dbg!(push_constants);
+        //dbg!(push_constants);
         
         let push_constants = bytemuck::cast_slice(push_constants);
         
