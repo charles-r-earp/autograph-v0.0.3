@@ -17,6 +17,11 @@ fn test_tensor_from_vec_cpu() {
 fn test_tensor_from_vec_cuda() {
     test_tensor_from_vec(CudaGpu::new(0));
 }
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_tensor_from_vec_web() {
+    test_tensor_from_vec(WebGpu::new(0));
+}
 fn test_u8_to_f32(device: impl Into<Device>) {
     let device = device.into();
     let vec: Vec<u8> = vec![1, 2, 3, 4];
@@ -164,7 +169,7 @@ fn test_gemm_mkn(m: usize, k: usize, n: usize, device: impl Into<Device>) {
         .into_iter()
         .map(|x| x.to_f32().unwrap())
         .collect();
-        
+
     {
         // MxK * KxN
         let x1 = Tensor::from_shape_vec(&device, [m, k], &vec1);
@@ -220,6 +225,11 @@ fn test_gemm_cpu() {
 fn test_gemm_cuda() {
     test_gemm(CudaGpu::new(0));
 }
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_gemm_web() {
+    test_gemm(WebGpu::new(0));
+}
 fn test_dense(device: impl Into<Device>) {
     let device = device.into();
     let m = 33;
@@ -232,21 +242,22 @@ fn test_dense(device: impl Into<Device>) {
     let vec2: Vec<f32> = (1..=k * n)
         .into_iter()
         .map(|x| x.to_f32().unwrap())
-        .collect(); 
+        .collect();
     let vec3: Vec<f32> = (1..=n)
         .into_iter()
         .rev()
         .map(|x| x.to_f32().unwrap())
-        .collect(); 
+        .collect();
     let x = Tensor::from_shape_vec(&device, [m, k], vec1.as_slice());
     let x_arr = Array::from_shape_vec([m, k], vec1).unwrap();
     let w = Tensor::from_shape_vec(&device, [n, k], vec2.as_slice());
     let w_arr = Array::from_shape_vec([n, k], vec2).unwrap();
     let b = Tensor::from_shape_vec(&device, n, vec3.as_slice());
-    
+
     let y = x.dense(&w.view(), Some(&b.view()));
     let mut y_arr = x_arr.dot(&w_arr.t());
-    y_arr.iter_mut()
+    y_arr
+        .iter_mut()
         .zip(vec3.iter().cycle())
         .for_each(|(y, b)| *y += *b);
     compare_vectors(&y.as_slice(), y_arr.as_slice().unwrap(), m, k, n);
@@ -393,6 +404,8 @@ fn test_cross_entropy(device: impl Into<Device>) {
         Device::Cuda(_) => {
             cuda::cross_entropy(&input, &target, &mut output);
         }
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => unimplemented!(),
     }
 
     let mut output_true = vec![0.; batch_size * nclasses];
@@ -941,7 +954,8 @@ fn test_max_pool_backward_cuda() {
 fn test_sgd_with_momentum(device: impl Into<Device>) {
     let device = device.into();
     let mut weight = Tensor::from_shape_vec(&device, 4, vec![0.1, 0.2, 0.3, 0.4]);
-    let weight_grad = Tensor::from_shape_vec(&device, weight.raw_dim(), vec![0.01, 0.02, 0.03, 0.04]);
+    let weight_grad =
+        Tensor::from_shape_vec(&device, weight.raw_dim(), vec![0.01, 0.02, 0.03, 0.04]);
     let mut velocity = Tensor::from_shape_vec(&device, weight.raw_dim(), vec![1., 2., 3., 4.]);
     let learning_rate = 0.001;
     let momentum = 0.1;
@@ -950,23 +964,24 @@ fn test_sgd_with_momentum(device: impl Into<Device>) {
         let mut weight = weight.as_slice().into_owned();
         let weight_grad = weight_grad.as_slice();
         let mut velocity = velocity.as_slice().into_owned();
-        weight.iter_mut()
+        weight
+            .iter_mut()
             .zip(weight_grad.iter())
             .zip(velocity.iter_mut())
             .for_each(|((w, &dw), v)| {
                 *v = momentum * *v + dw;
                 *w -= learning_rate * *v;
             });
-       let weight_true = Array::from_shape_vec(dim, weight).unwrap();
-       let velocity_true = Array::from_shape_vec(dim, velocity).unwrap();
-       (weight_true, velocity_true)
+        let weight_true = Array::from_shape_vec(dim, weight).unwrap();
+        let velocity_true = Array::from_shape_vec(dim, velocity).unwrap();
+        (weight_true, velocity_true)
     };
     sgd_with_momentum(
         &mut weight,
         &weight_grad,
         learning_rate,
         momentum,
-        &mut velocity
+        &mut velocity,
     );
     assert_eq!(velocity.as_array().view(), velocity_true.view());
     assert_eq!(weight.as_array().view(), weight_true.view());
@@ -975,7 +990,7 @@ fn test_sgd_with_momentum(device: impl Into<Device>) {
 fn test_sgd_with_momentum_cpu() {
     test_sgd_with_momentum(Cpu::new());
 }
-#[cfg(feature="cuda")]
+#[cfg(feature = "cuda")]
 #[test]
 fn test_sgd_with_momentum_cuda() {
     test_sgd_with_momentum(CudaGpu::new(0));

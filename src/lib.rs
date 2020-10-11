@@ -27,9 +27,11 @@ pub mod cpu;
 pub use cpu::Cpu;
 use cpu::CpuBuffer;
 
+#[cfg(feature = "webgpu")]
 #[doc(hidden)]
 pub mod webgpu;
-pub use webgpu::{WebGpu, WebBuffer, WebType};
+#[cfg(feature = "webgpu")]
+pub use webgpu::{WebBuffer, WebGpu, WebType};
 
 #[doc(hidden)]
 #[cfg(feature = "cuda")]
@@ -65,6 +67,13 @@ pub trait DeviceCopy {}
 #[cfg(not(feature = "cuda"))]
 impl<T: PrivateNum> DeviceCopy for T {}
 
+#[doc(hidden)]
+#[cfg(not(feature = "webgpu"))]
+pub trait WebType {}
+
+#[cfg(not(feature = "webgpu"))]
+impl<T: PrivateNum> WebType for T {}
+
 /// Num is a trait for all data types that Tensor can store, it cannot be implemented for additional types
 pub trait Num:
     'static + Copy + DeviceCopy + WebType + Default + Zero + One + ToPrimitive + Bounded + PartialEq
@@ -85,6 +94,8 @@ pub enum Buffer<T: Num> {
     Cpu(CpuBuffer<T>),
     #[cfg(feature = "cuda")]
     Cuda(CudaBuffer<T>),
+    #[cfg(feature = "webgpu")]
+    Web(WebBuffer<T>),
 }
 
 impl<T: Num> From<CpuBuffer<T>> for Buffer<T> {
@@ -100,12 +111,21 @@ impl<T: Num> From<CudaBuffer<T>> for Buffer<T> {
     }
 }
 
+#[cfg(feature = "webgpu")]
+impl<T: Num> From<WebBuffer<T>> for Buffer<T> {
+    fn from(buffer: WebBuffer<T>) -> Self {
+        Buffer::Web(buffer)
+    }
+}
+
 impl<T: Num> Buffer<T> {
     unsafe fn uninitialized(device: &Device, len: usize) -> Self {
         match device {
             Device::Cpu(_) => CpuBuffer::uninitialized(len).into(),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => CudaBuffer::uninitialized(cuda_gpu, len).into(),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => WebBuffer::uninitialized(web_gpu, len).into(),
         }
     }
     fn from_vec<'a>(device: &Device, vec: impl Into<Cow<'a, [T]>>) -> Self {
@@ -118,6 +138,8 @@ impl<T: Num> Buffer<T> {
                 buffer.copy_from_slice(slice);
                 buffer.into()
             }
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => WebBuffer::from_slice(web_gpu, &vec.into()).into(),
         }
     }
     fn zeros(device: &Device, len: usize) -> Self {
@@ -129,6 +151,8 @@ impl<T: Num> Buffer<T> {
                 buffer.fill(T::zero());
                 buffer.into()
             }
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => WebBuffer::zeros(web_gpu, len).into(),
         }
     }
     fn len(&self) -> usize {
@@ -136,6 +160,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.len(),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.len(),
+            #[cfg(feature = "webgpu")]
+            Buffer::Web(web_buffer) => web_buffer.len(),
         }
     }
     fn fill(&mut self, elem: T) {
@@ -143,6 +169,8 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.fill(elem),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.fill(elem),
+            #[cfg(feature = "webgpu")]
+            Buffer::Web(web_buffer) => web_buffer.fill(elem),
         }
     }
     fn as_slice(&self) -> Cow<[T]> {
@@ -150,13 +178,17 @@ impl<T: Num> Buffer<T> {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.as_slice().into(),
             #[cfg(feature = "cuda")]
             Buffer::Cuda(cuda_buffer) => cuda_buffer.to_vec().into(),
+            #[cfg(feature = "webgpu")]
+            Buffer::Web(web_buffer) => web_buffer.to_vec().into(),
         }
     }
     fn copy_from_slice<'a>(&mut self, slice: impl Into<Cow<'a, [T]>>) {
         match self {
             Buffer::Cpu(cpu_buffer) => cpu_buffer.copy_from_slice(slice),
             #[cfg(feature = "cuda")]
-            Buffer::Cuda(cuda_buffer) => cuda_buffer.copy_from_slice(slice)
+            Buffer::Cuda(cuda_buffer) => cuda_buffer.copy_from_slice(slice),
+            #[cfg(feature = "webgpu")]
+            Buffer::Web(web_buffer) => web_buffer.copy_from_slice(&slice.into()),
         }
     }
     fn cpu(&self) -> Option<&CpuBuffer<T>> {
@@ -185,6 +217,20 @@ impl<T: Num> Buffer<T> {
             _ => None,
         }
     }
+    #[cfg(feature = "webgpu")]
+    fn web(&self) -> Option<&WebBuffer<T>> {
+        match self {
+            Buffer::Web(web_buffer) => Some(web_buffer),
+            _ => None,
+        }
+    }
+    #[cfg(feature = "webgpu")]
+    fn web_mut(&mut self) -> Option<&mut WebBuffer<T>> {
+        match self {
+            Buffer::Web(web_buffer) => Some(web_buffer),
+            _ => None,
+        }
+    }
 }
 
 /// Device is an enum that is used to select whether to store and execute operations on the cpu or a gpu.\
@@ -200,6 +246,8 @@ pub enum Device {
     Cpu(Arc<Cpu>),
     #[cfg(feature = "cuda")]
     Cuda(Arc<CudaGpu>),
+    #[cfg(feature = "webgpu")]
+    Web(Arc<WebGpu>),
 }
 
 impl Device {
@@ -216,11 +264,22 @@ impl Device {
             _ => None,
         }
     }
+    #[cfg(feature = "webgpu")]
+    fn web(&self) -> Option<&Arc<WebGpu>> {
+        match self {
+            Device::Web(web_gpu) => Some(web_gpu),
+            _ => None,
+        }
+    }
     /// For cpu does nothing. For cuda, blocks until all operations on the device are finished. Only necessary for timing ie for benchmarks. Any tranfers back to the cpu will implicitly synchronize.
     pub fn synchronize(&self) {
         #[cfg(feature = "cuda")]
         {
             self.cuda().map(|gpu| gpu.synchronize());
+        }
+        #[cfg(feature = "webgpu")]
+        {
+            self.web().map(|gpu| gpu.synchronize());
         }
     }
 }
@@ -228,8 +287,13 @@ impl Device {
 /// Use Device::default() to get a gpu if available, or a cpu
 impl Default for Device {
     fn default() -> Self {
-        #[cfg(feature = "cuda")] {
+        #[cfg(feature = "cuda")]
+        {
             return CudaGpu::new(0).into();
+        }
+        #[cfg(feature = "webgpu")]
+        {
+            return WebGpu::new(0).into();
         }
         Cpu::new().into()
     }
@@ -248,6 +312,13 @@ impl From<Arc<CudaGpu>> for Device {
     }
 }
 
+#[cfg(feature = "webgpu")]
+impl From<Arc<WebGpu>> for Device {
+    fn from(web_gpu: Arc<WebGpu>) -> Self {
+        Device::Web(web_gpu)
+    }
+}
+
 impl PartialEq for Device {
     fn eq(&self, other: &Self) -> bool {
         match self {
@@ -258,6 +329,11 @@ impl PartialEq for Device {
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu1) => match other {
                 Device::Cuda(cuda_gpu2) => Arc::ptr_eq(cuda_gpu1, cuda_gpu2),
+                _ => false,
+            },
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu1) => match other {
+                Device::Web(web_gpu2) => Arc::ptr_eq(web_gpu1, web_gpu2),
                 _ => false,
             },
         }
@@ -686,6 +762,10 @@ impl<T: Num, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
     fn as_cuda_ptr(&self) -> Option<*const T> {
         self.data.buffer().cuda().map(|b| b.as_ptr())
     }
+    #[cfg(feature = "webgpu")]
+    fn as_web_buffer(&self) -> Option<&WebBuffer<T>> {
+        self.data.buffer().web()
+    }
 }
 
 impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
@@ -696,6 +776,8 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::reduce_sum(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::reduce_sum(self, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
         output
     }
@@ -706,6 +788,8 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::relu(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::relu(self, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
         output
     }
@@ -720,6 +804,8 @@ impl<S: DataMut<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::add(self, rhs, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::add(self, rhs, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
         output
     }
@@ -731,6 +817,8 @@ impl<S: DataMut<Elem = f32>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::scaled_add(self, alpha, rhs),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::scaled_add(self, alpha, rhs),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
     }
 }
@@ -746,6 +834,8 @@ impl<T: Unsigned, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
             Device::Cpu(cpu) => cpu::unsigned_to_f32(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_f32(self, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
         output
     }
@@ -760,6 +850,8 @@ impl<T: Unsigned, S: DataRef<Elem = T>> TensorBase<S, Ix1> {
             Device::Cpu(cpu) => cpu::unsigned_to_one_hot_f32(self, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_one_hot_f32(self, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
         output
     }
@@ -774,8 +866,7 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
         TensorViewMut { device, dim, data }
     }
     pub fn copy_from_slice<'a>(&mut self, slice: impl Into<Cow<'a, [T]>>) {
-        self.data.buffer_mut()
-            .copy_from_slice(slice);
+        self.data.buffer_mut().copy_from_slice(slice);
     }
     fn as_mut_cpu_slice(&mut self) -> Option<&mut [T]> {
         self.data
@@ -800,28 +891,29 @@ impl<T: Num, S: DataMut<Elem = T>, D: Dimension> TensorBase<S, D> {
             .cuda_mut()
             .map(|mut b| b.as_mut_ptr())
     }
+    #[cfg(feature = "webgpu")]
+    fn as_mut_web_buffer(&mut self) -> Option<&mut WebBuffer<T>> {
+        self.data.buffer_mut().web_mut()
+    }
     /// Fills the tensor with the provided elem.  
     pub fn fill(&mut self, elem: T) {
         self.data.buffer_mut().fill(elem);
     }
     /// Fills the tensor with data sampled from distr with the given rng. On cuda, samples into a vec and then copies to the device buffer
     pub fn fill_random(&mut self, distr: &impl Distribution<T>, mut rng: &mut impl Rng) {
-        match self.data.buffer_mut() {
-            Buffer::Cpu(cpu_buffer) => {
-                cpu_buffer
-                    .as_mut_slice()
-                    .iter_mut()
-                    .zip(distr.sample_iter(&mut rng))
-                    .for_each(|(y, x)| *y = x);
-            }
-            #[cfg(feature = "cuda")]
-            Buffer::Cuda(cuda_buffer) => {
-                let vec: Vec<T> = distr
-                    .sample_iter(&mut rng)
-                    .take(cuda_buffer.len())
-                    .collect();
-                cuda_buffer.copy_from_slice(&vec);
-            }
+        if let Some(cpu_slice) = self.as_mut_cpu_slice() {
+            cpu_slice
+                .iter_mut()
+                .zip(distr.sample_iter(&mut rng))
+                .for_each(|(y, x)| {
+                    *y = x;
+                });
+        } else {
+            let vec: Vec<T> = distr
+                .sample_iter(&mut rng)
+                .take(self.data.buffer().len())
+                .collect();
+            self.data.buffer_mut().copy_from_slice(vec);
         }
     }
 }
@@ -832,7 +924,7 @@ impl<T: Num, D: Dimension> From<Tensor<T, D>> for ArcTensor<T, D> {
         let data = ArcRepr::from_buffer(data.buffer);
         Self { device, dim, data }
     }
-} 
+}
 
 impl<T: Num, D: Dimension> RwTensor<T, D> {
     /// Similar to RwLock::read(), blocks the current thread until any write access is released, ensures that no writes occur as long as the RwReadTensor is held
@@ -890,6 +982,8 @@ fn broadcast<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Dimension>(
         Device::Cpu(cpu) => cpu::broadcast(input, output),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast(input, output),
+        #[cfg(feature = "webgpu")]
+        Device::Web(web_gpu) => unimplemented!(),
     }
 }
 
@@ -902,6 +996,8 @@ fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Dimen
         Device::Cpu(cpu) => cpu::broadcast_backward(input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast_backward(input_grad, output_grad),
+        #[cfg(feature = "webgpu")]
+        Device::Web(web_gpu) => unimplemented!(),
     }
 }
 
@@ -923,16 +1019,18 @@ fn relu_backward<
         Device::Cpu(cpu) => cpu::relu_backward(input, input_grad, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::relu_backward(input, input_grad, output_grad),
+        #[cfg(feature = "webgpu")]
+        Device::Web(web_gpu) => unimplemented!(),
     }
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Transpose {
+enum Transpose {
     No,
     Yes,
 }
 
-pub fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32>>(
+fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem = f32>>(
     alpha: f32,
     a: &TensorBase<S1, Ix2>,
     trans_a: Transpose,
@@ -947,6 +1045,8 @@ pub fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem =
         Device::Cpu(_) => cpu::gemm(alpha, a, trans_a, b, trans_b, beta, c),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::gemm(alpha, a, trans_a, b, trans_b, beta, c),
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => webgpu::gemm(alpha, a, trans_a, b, trans_b, beta, c),
     }
 }
 
@@ -973,6 +1073,8 @@ fn cross_entropy_backward<
         Device::Cuda(cuda_gpu) => {
             cuda::cross_entropy_backward(input, input_grad, target, output_grad)
         }
+        #[cfg(feature = "webgpu")]
+        Device::Web(web_gpu) => unimplemented!(),
     }
 }
 
@@ -1001,8 +1103,7 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix2> {
                         1.,
                         &mut output,
                     );
-                }   
-                else {
+                } else {
                     gemm(
                         1.,
                         &self,
@@ -1013,7 +1114,7 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix2> {
                         &mut output,
                     );
                 }
-            }   
+            }
         }
         output
     }
@@ -1025,6 +1126,8 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix2> {
             Device::Cpu(cpu) => cpu::cross_entropy(self, target, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::cross_entropy(self, target, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(web_gpu) => unimplemented!(),
         }
         output.sum()
     }
@@ -1100,6 +1203,8 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix4> {
             Device::Cpu(_) => cpu::conv2d(self, weight, bias, args, &mut output),
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => cuda::conv2d(self, weight, bias, args, &mut output),
+            #[cfg(feature = "webgpu")]
+            Device::Web(_) => unimplemented!(),
         }
         output
     }
@@ -1133,6 +1238,8 @@ fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
         Device::Cpu(_) => cpu::conv2d_backward_input(input_grad, weight, args, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::conv2d_backward_input(input_grad, weight, args, output_grad),
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => unimplemented!(),
     }
 }
 
@@ -1159,6 +1266,8 @@ fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
         Device::Cuda(_) => {
             cuda::conv2d_backward_weight_bias(input, weight_grad, bias_grad, args, output_grad)
         }
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => unimplemented!(),
     }
 }
 
@@ -1185,6 +1294,8 @@ fn max_pool2d_forward<S1: DataRef<Elem = f32>>(
             cuda::max_pool2d(input, args, &mut output);
             None
         }
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => unimplemented!(),
     };
     (output, workspace)
 }
@@ -1207,20 +1318,36 @@ fn max_pool2d_backward<
         Device::Cpu(_) => cpu::max_pool2d_backward(input, input_grad, args, workspace, output_grad),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => cuda::max_pool2d_backward(input, input_grad, args, output_grad),
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => unimplemented!(),
     }
 }
 
-fn sgd_with_momentum<S1: DataMut<Elem=f32>, S2: DataRef<Elem=f32>, S3: DataMut<Elem=f32>, D: Dimension>
-    (weight: &mut TensorBase<S1, D>, weight_grad: &TensorBase<S2, D>,
-     learning_rate: f32, momentum: f32,
-     velocity: &mut TensorBase<S3, D>) {
+fn sgd_with_momentum<
+    S1: DataMut<Elem = f32>,
+    S2: DataRef<Elem = f32>,
+    S3: DataMut<Elem = f32>,
+    D: Dimension,
+>(
+    weight: &mut TensorBase<S1, D>,
+    weight_grad: &TensorBase<S2, D>,
+    learning_rate: f32,
+    momentum: f32,
+    velocity: &mut TensorBase<S3, D>,
+) {
     debug_assert_eq!(weight.device(), weight_grad.device());
     debug_assert_eq!(weight.device(), velocity.device());
     debug_assert_eq!(weight.raw_dim(), weight_grad.raw_dim());
     debug_assert_eq!(weight.raw_dim(), velocity.raw_dim());
     match weight.device() {
-        Device::Cpu(_) => cpu::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity),
-        #[cfg(feature="cuda")]
-        Device::Cuda(_) => cuda::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity)
-    }                                     
-} 
+        Device::Cpu(_) => {
+            cpu::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity)
+        }
+        #[cfg(feature = "cuda")]
+        Device::Cuda(_) => {
+            cuda::sgd_with_momentum(weight, weight_grad, learning_rate, momentum, velocity)
+        }
+        #[cfg(feature = "webgpu")]
+        Device::Web(_) => unimplemented!(),
+    }
+}

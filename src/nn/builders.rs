@@ -1,4 +1,4 @@
-use super::{Conv2dArgs, Pool2dArgs, Conv2d, Dense, MaxPool2d};
+use super::{Conv2d, Conv2dArgs, Dense, MaxPool2d, Pool2dArgs};
 use crate::{Device, Into2d};
 
 #[derive(Default, Clone)]

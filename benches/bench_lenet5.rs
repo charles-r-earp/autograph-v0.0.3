@@ -2,8 +2,8 @@
 #[macro_use]
 extern crate autograph;
 use autograph::nn::{
+    autograd::{Graph, ParameterD, Variable, Variable2, Variable4},
     Conv2d, Dense, Forward, Layer, Pool2dArgs,
-    autograd::{Graph, ParameterD, Variable, Variable2, Variable4}
 };
 #[cfg(feature = "cuda")]
 use autograph::CudaGpu;

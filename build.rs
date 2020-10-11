@@ -2,7 +2,8 @@
 use std::{env, ffi::CString, process::Command};
 
 fn main() {
-    { // onednn cpp 
+    {
+        // onednn cpp
         cpp_build::Config::new()
             .include(env::var("DEP_DNNL_INCLUDE").unwrap())
             .build("src/lib.rs");

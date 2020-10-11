@@ -246,7 +246,7 @@ pub fn dense<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem 
     input: &TensorBase<S1, Ix2>,
     weight: &TensorBase<S2, Ix2>,
     bias: Option<&TensorView1<f32>>,
-    output: &mut TensorBase<S3, Ix2>
+    output: &mut TensorBase<S3, Ix2>,
 ) {
     let cpu = input.device().cpu().unwrap();
     let engine_ptr = unsafe { &cpu.engine as *const Engine };
@@ -254,18 +254,18 @@ pub fn dense<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem 
     let stream_ptr = unsafe { &mut *stream as *mut Stream };
     let (batch_size, inputs) = input.dim();
     let (outputs, _) = weight.dim();
-    
+
     let x = input.as_cpu_ptr().unwrap();
     let w = weight.as_cpu_ptr().unwrap();
     let y = output.as_mut_cpu_ptr().unwrap();
-    
+
     let n = batch_size as i64;
     let i = inputs as i64;
     let o = outputs as i64;
-    
+
     if let Some(bias) = bias {
         let b = bias.as_cpu_ptr().unwrap();
-        
+
         cpp!(unsafe [engine_ptr as "const dnnl::engine*",
                      stream_ptr as "dnnl::stream*",
                      n as "dnnl_dim_t",
@@ -277,7 +277,7 @@ pub fn dense<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem 
                      y as "float*"] {
             auto engine = *engine_ptr;
             auto stream = *stream_ptr;
-            
+
             auto x_desc = dnnl::memory::desc({n, i}, dnnl_dt::f32, dnnl_tag::ab);
             auto x_mem = dnnl::memory(x_desc, engine, (float*)x);
             auto w_desc = dnnl::memory::desc({i, o}, dnnl_dt::f32, dnnl_tag::ba);
@@ -286,7 +286,7 @@ pub fn dense<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem 
             auto b_mem = dnnl::memory(b_desc, engine, (float*)b);
             auto y_desc = dnnl::memory::desc({n, o}, dnnl_dt::f32, dnnl_tag::ab);
             auto y_mem = dnnl::memory(y_desc, engine, y);
-            
+
             auto matmul_d = dnnl::matmul::desc(x_desc, w_desc, b_desc, y_desc);
             dnnl::primitive_attr attr;
             auto matmul_pd = dnnl::matmul::primitive_desc(matmul_d, attr, engine);
@@ -296,13 +296,12 @@ pub fn dense<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut<Elem 
             args.insert({DNNL_ARG_WEIGHTS, w_mem});
             args.insert({DNNL_ARG_BIAS, b_mem});
             args.insert({DNNL_ARG_DST, y_mem});
-            
+
             matmul.execute(stream, args);
-            
+
             stream.wait();
         });
-    }
-    else {
+    } else {
         unimplemented!();
     }
 }
@@ -1319,14 +1318,23 @@ pub(super) fn max_pool2d_backward<
     });
 }
 
-pub(super) fn sgd_with_momentum<S1: DataMut<Elem=f32>, S2: DataRef<Elem=f32>, S3: DataMut<Elem=f32>, D: Dimension>
-    (weight: &mut TensorBase<S1, D>, weight_grad: &TensorBase<S2, D>,
-     learning_rate: f32, momentum: f32,
-     velocity: &mut TensorBase<S3, D>) {
-     let mut weight = weight.as_mut_cpu_slice().unwrap();
-     let weight_grad = weight_grad.as_cpu_slice().unwrap();
-     let mut velocity = velocity.as_mut_cpu_slice().unwrap();
-     weight.iter_mut()
+pub(super) fn sgd_with_momentum<
+    S1: DataMut<Elem = f32>,
+    S2: DataRef<Elem = f32>,
+    S3: DataMut<Elem = f32>,
+    D: Dimension,
+>(
+    weight: &mut TensorBase<S1, D>,
+    weight_grad: &TensorBase<S2, D>,
+    learning_rate: f32,
+    momentum: f32,
+    velocity: &mut TensorBase<S3, D>,
+) {
+    let mut weight = weight.as_mut_cpu_slice().unwrap();
+    let weight_grad = weight_grad.as_cpu_slice().unwrap();
+    let mut velocity = velocity.as_mut_cpu_slice().unwrap();
+    weight
+        .iter_mut()
         .zip(weight_grad.iter())
         .zip(velocity.iter_mut())
         .for_each(|((w, &dw), v)| {

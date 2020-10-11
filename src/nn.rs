@@ -1,7 +1,5 @@
 use crate::{
-    Device, Num, RwTensor, Tensor, Tensor2, Tensor4, TensorView,
-    TensorView2, TensorView4,
-    Into2d
+    Device, Into2d, Num, RwTensor, Tensor, Tensor2, Tensor4, TensorView, TensorView2, TensorView4,
 };
 use ndarray::{Dimension, Ix2, Ix4, RemoveAxis};
 
@@ -9,7 +7,9 @@ pub mod builders;
 use builders::{Conv2dBuilder, DenseBuilder, MaxPool2dBuilder};
 
 pub mod autograd;
-use autograd::{Parameter, Parameter1, Parameter2, Parameter4, ParameterD, Variable, Variable2, Variable4};
+use autograd::{
+    Parameter, Parameter1, Parameter2, Parameter4, ParameterD, Variable, Variable2, Variable4,
+};
 
 pub mod optimizer;
 
@@ -321,7 +321,7 @@ impl<D: Dimension> Forward<D> for Relu {
 
 /// MaxPool2d\
 ///
-/// see Tensor::max_pool2d() 
+/// see Tensor::max_pool2d()
 pub struct MaxPool2d {
     args: Pool2dArgs,
 }
@@ -378,30 +378,30 @@ impl<D: RemoveAxis> Forward<D> for Flatten {
 }
 
 /// A Sequence of Layers
-pub struct Sequential<S>(S); 
+pub struct Sequential<S>(S);
 
 impl<L> From<Vec<L>> for Sequential<Vec<L>> {
     fn from(layers: Vec<L>) -> Self {
         Sequential(layers)
     }
-} 
+}
 
 impl<L: Layer> Layer for Sequential<Vec<L>> {
     fn parameters(&self) -> Vec<ParameterD> {
-        self.0.iter()
-            .flat_map(|layer| layer.parameters())
-            .collect()
-    } 
+        self.0.iter().flat_map(|layer| layer.parameters()).collect()
+    }
     fn set_training(&mut self, training: bool) {
-        self.0.iter_mut()
+        self.0
+            .iter_mut()
             .for_each(|layer| layer.set_training(training));
     }
 }
 
-impl<D: Dimension, L: Forward<D, OutputDim=D>> Forward<D> for Sequential<Vec<L>> {
+impl<D: Dimension, L: Forward<D, OutputDim = D>> Forward<D> for Sequential<Vec<L>> {
     type OutputDim = D;
     fn forward(&self, input: &Variable<D>) -> Variable<D> {
-        self.0.iter()
-            .fold(input.clone(), |x, layer| layer.forward(&x)) 
+        self.0
+            .iter()
+            .fold(input.clone(), |x, layer| layer.forward(&x))
     }
-} 
+}

@@ -2,14 +2,14 @@ use super::Sgd;
 
 pub struct SgdBuilder {
     pub(super) learning_rate: f32,
-    pub(super) momentum: f32
+    pub(super) momentum: f32,
 }
 
 impl Default for SgdBuilder {
     fn default() -> Self {
         Self {
             learning_rate: 0.001,
-            momentum: 0.
+            momentum: 0.,
         }
     }
 }

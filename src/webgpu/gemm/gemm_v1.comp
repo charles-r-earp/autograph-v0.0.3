@@ -45,6 +45,8 @@ void main() {
     for(uint k = 0; k < K; ++k) {
         tile_k = (k + K_TILE) % K_TILE;  
         if (tile_k == 0) {
+            memoryBarrierShared();
+            
             if (global_x < M) {
                 a_tile[local_x][local_y] = a[global_x * rsa + (k + local_y) * csa + offa];
             }    
@@ -53,14 +55,16 @@ void main() {
                 b_tile[local_x][local_y] = b[(k + local_x) * rsb + global_y * csb + offb];
             }
             
-            memoryBarrierShared();
+            barrier();    
         }
+        
+        memoryBarrierShared();
         
         if (valid) {
             acc += a_tile[local_x][tile_k] * b_tile[tile_k][local_y];
         }
         
-        memoryBarrierShared();
+        barrier();
     } 
     
     if (valid) {

@@ -2,21 +2,21 @@
 use argparse::{ArgumentParser, Store, StoreTrue};
 #[macro_use]
 extern crate autograph;
+use autograph::datasets::Mnist; // requires feature "datasets"
 use autograph::nn::{
-    Conv2d, Dense, Forward, Layer, Pool2dArgs,
     autograd::{Graph, ParameterD, Variable, Variable2, Variable4},
     optimizer::{Optimizer, Sgd},
-    saved::{SavedModel, SavedCheckpoint},
+    saved::{SavedCheckpoint, SavedModel},
+    Conv2d, Dense, Forward, Layer, Pool2dArgs,
 };
-use autograph::datasets::Mnist; // requires feature "datasets"
 use autograph::utils::classification_accuracy;
 use autograph::{ArcTensor, Device, Tensor, Tensor2, Tensor4, TensorView4};
 use ndarray::{Dimension, Ix2, Ix4};
 use num_traits::ToPrimitive;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use rand_distr::{Distribution, Normal, Uniform};
-use std::time::Instant;
 use std::fs;
+use std::time::Instant;
 
 // A version of the LeNet5 Model
 // Layer can be derived for meta layers
@@ -127,15 +127,17 @@ fn main() {
                 Store,
                 "Evaluation Batch Size",
             );
-            ap.refer(&mut save)
-                .add_option(
-                &["--save"],
-                Store,
-                "Save"
-            );
+            ap.refer(&mut save).add_option(&["--save"], Store, "Save");
             ap.parse_args_or_exit();
         }
-        (epochs, learning_rate, momentum, train_batch_size, eval_batch_size, save)
+        (
+            epochs,
+            learning_rate,
+            momentum,
+            train_batch_size,
+            eval_batch_size,
+            save,
+        )
     };
 
     println!("epochs: {}", epochs);
@@ -144,32 +146,31 @@ fn main() {
     println!("train_batch_size: {}", train_batch_size);
     println!("eval_batch_size: {}", eval_batch_size);
     println!("save: {}", save);
-    
 
     // Devices can be created with the From trait
-    // ie Device::from(Cpu::new()) 
+    // ie Device::from(Cpu::new())
     // or Device::from(CudaGpu::new(index))
     // Default returns a CudaGpu if cuda is enabled, otherwise a Cpu
     let device = Device::default();
     println!("device: {:?}", &device);
-    
+
     let mut model = Lenet5::new(&device);
-    
+
     let dataset = Mnist::new();
 
     fs::create_dir_all("models/mnist_lenet5/checkpoints");
-    
+
     // models are saved as [name].model
     let model_path = "models/mnist_lenet5/mnist_lenet5";
     // checkpoints are saved as [name]_epoch[epoch].checkpoint
     let checkpoint_path = "models/mnist_lenet5/checkpoints/mnist_lenet5";
-    
+
     // Load and test the model if found
     if let Ok(saved_model) = SavedModel::load(model_path) {
         saved_model.load_parameters(model.parameters());
         let mut eval_loss = 0.;
         let mut eval_correct: usize = 0;
-         let start = Instant::now();
+        let start = Instant::now();
         dataset.eval(eval_batch_size).for_each(|(x_arr, t_arr)| {
             model.set_training(false);
             let x = Variable::new(None, Tensor::from_array(&device, x_arr).to_f32(), false);
@@ -182,17 +183,17 @@ fn main() {
         eval_loss /= 10_000f32;
         let eval_acc = eval_correct.to_f32().unwrap() * 100f32 / 10_000f32;
         let elapsed = Instant::now() - start;
-        println!("trained model: elapsed {:.0?} eval_loss: {:.5} eval_acc: {:.2}%", 
-            elapsed, eval_loss, eval_acc);
-    }
-    else {
+        println!(
+            "trained model: elapsed {:.0?} eval_loss: {:.5} eval_acc: {:.2}%",
+            elapsed, eval_loss, eval_acc
+        );
+    } else {
         let (epoch, mut optim) = {
             // continue training if checkpoint is found
             if let Ok(saved_checkpoint) = SavedCheckpoint::load(checkpoint_path) {
                 let (epoch, optim) = saved_checkpoint.load_parameters(model.parameters());
                 (epoch + 1, optim)
-            }
-            else {
+            } else {
                 // initialize
                 let mut rng = SmallRng::seed_from_u64(0);
                 model.parameters().into_iter().for_each(|w| {
@@ -235,7 +236,7 @@ fn main() {
             });
             train_loss /= 60_000f32;
             let train_acc = train_correct.to_f32().unwrap() * 100f32 / 60_000f32;
-                
+
             let mut eval_loss = 0.;
             let mut eval_correct: usize = 0;
             dataset.eval(eval_batch_size).for_each(|(x_arr, t_arr)| {
@@ -252,12 +253,12 @@ fn main() {
             let elapsed = Instant::now() - start;
             println!("epoch: {} elapsed {:.0?} train_loss: {:.5} train_acc: {:.2}% eval_loss: {:.5} eval_acc: {:.2}%", 
                 epoch, elapsed, train_loss, train_acc, eval_loss, eval_acc);
-            if save {    
+            if save {
                 SavedCheckpoint::new(epoch, model.parameters(), &optim)
                     .save(&checkpoint_path)
                     .expect("Unable to save checkpoint!");
-            }        
-        }   
+            }
+        }
         if save {
             SavedModel::new(model.parameters())
                 .save(&model_path)

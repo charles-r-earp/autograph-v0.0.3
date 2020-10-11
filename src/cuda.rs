@@ -4,30 +4,32 @@ use super::{
 };
 use cuda_cudnn_sys::{
     cudnnActivationBackward, cudnnActivationDescriptor_t, cudnnActivationForward,
-    cudnnActivationMode_t, cudnnHandle_t, cudnnConvolutionBackwardBias,
-    cudnnConvolutionBackwardData, cudnnConvolutionBackwardFilter,
-    cudnnConvolutionBiasActivationForward, cudnnConvolutionBwdDataAlgoPerf_t,
-    cudnnConvolutionBwdDataAlgo_t, cudnnConvolutionBwdFilterAlgoPerf_t,
-    cudnnConvolutionBwdFilterAlgo_t, cudnnConvolutionDescriptor_t, cudnnConvolutionForward,
-    cudnnConvolutionFwdAlgoPerf_t, cudnnConvolutionFwdAlgo_t, cudnnConvolutionMode_t, cudnnCreate, cudnnSetStream,
+    cudnnActivationMode_t, cudnnConvolutionBackwardBias, cudnnConvolutionBackwardData,
+    cudnnConvolutionBackwardFilter, cudnnConvolutionBiasActivationForward,
+    cudnnConvolutionBwdDataAlgoPerf_t, cudnnConvolutionBwdDataAlgo_t,
+    cudnnConvolutionBwdFilterAlgoPerf_t, cudnnConvolutionBwdFilterAlgo_t,
+    cudnnConvolutionDescriptor_t, cudnnConvolutionForward, cudnnConvolutionFwdAlgoPerf_t,
+    cudnnConvolutionFwdAlgo_t, cudnnConvolutionMode_t, cudnnCreate,
     cudnnCreateActivationDescriptor, cudnnCreateConvolutionDescriptor, cudnnCreateFilterDescriptor,
-    cudnnCreatePoolingDescriptor, cudnnCreateTensorDescriptor, cudnnDataType_t, cudnnDestroy,
-    cudnnDestroyActivationDescriptor, cudnnDestroyConvolutionDescriptor,
-    cudnnDestroyFilterDescriptor, cudnnDestroyPoolingDescriptor, cudnnDestroyTensorDescriptor,
+    cudnnCreateOpTensorDescriptor, cudnnCreatePoolingDescriptor, cudnnCreateTensorDescriptor,
+    cudnnDataType_t, cudnnDestroy, cudnnDestroyActivationDescriptor,
+    cudnnDestroyConvolutionDescriptor, cudnnDestroyFilterDescriptor,
+    cudnnDestroyOpTensorDescriptor, cudnnDestroyPoolingDescriptor, cudnnDestroyTensorDescriptor,
     cudnnFilterDescriptor_t, cudnnGetConvolutionBackwardDataAlgorithm_v7,
     cudnnGetConvolutionBackwardDataWorkspaceSize, cudnnGetConvolutionBackwardFilterAlgorithm_v7,
     cudnnGetConvolutionBackwardFilterWorkspaceSize, cudnnGetConvolutionForwardAlgorithm_v7,
-    cudnnGetConvolutionForwardWorkspaceSize, cudnnMathType_t, cudnnNanPropagation_t,
-    cudnnPoolingBackward, cudnnPoolingDescriptor_t, cudnnPoolingForward, cudnnPoolingMode_t,
+    cudnnGetConvolutionForwardWorkspaceSize, cudnnHandle_t, cudnnMathType_t, cudnnNanPropagation_t,
+    cudnnOpTensor, cudnnOpTensorDescriptor_t, cudnnOpTensorOp_t, cudnnPoolingBackward,
+    cudnnPoolingDescriptor_t, cudnnPoolingForward, cudnnPoolingMode_t,
     cudnnSetActivationDescriptor, cudnnSetConvolution2dDescriptor, cudnnSetConvolutionMathType,
-    cudnnSetFilter4dDescriptor, cudnnSetPooling2dDescriptor, cudnnSetTensor4dDescriptor,
-    cudnnSetTensor4dDescriptorEx, cudnnStatus_t, cudnnTensorDescriptor_t, cudnnTensorFormat_t,
-    cudnnOpTensorDescriptor_t, cudnnCreateOpTensorDescriptor, cudnnOpTensorOp_t, cudnnSetOpTensorDescriptor, 
-    cudnnOpTensor, cudnnDestroyOpTensorDescriptor
+    cudnnSetFilter4dDescriptor, cudnnSetOpTensorDescriptor, cudnnSetPooling2dDescriptor,
+    cudnnSetStream, cudnnSetTensor4dDescriptor, cudnnSetTensor4dDescriptorEx, cudnnStatus_t,
+    cudnnTensorDescriptor_t, cudnnTensorFormat_t,
 };
 use cuda_sys::cublas::{
-    cublasHandle_t, cublasCreate_v2, cublasDestroy_v2, cublasSetStream_v2, cublasOperation_t_CUBLAS_OP_N,
-    cublasOperation_t_CUBLAS_OP_T, cublasSaxpy_v2, cublasSgemm_v2, cublasStatus_t,
+    cublasCreate_v2, cublasDestroy_v2, cublasHandle_t, cublasOperation_t_CUBLAS_OP_N,
+    cublasOperation_t_CUBLAS_OP_T, cublasSaxpy_v2, cublasSetStream_v2, cublasSgemm_v2,
+    cublasStatus_t,
 };
 use cuda_sys::cuda::{cuMemsetD32_v2, cuMemsetD8_v2, cudaError_t};
 use cuda_sys::cudart::cudaStream_t;
@@ -44,9 +46,9 @@ use rustacuda::{
 use std::{
     any::TypeId,
     borrow::Cow,
-    ffi::{CString, c_void},
+    ffi::{c_void, CString},
     fmt::{self, Debug},
-    sync::{Arc, Mutex, MutexGuard, LockResult, PoisonError},
+    sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError},
 };
 
 mod error;
@@ -65,24 +67,15 @@ impl StreamExt for Stream {
 
 #[doc(hidden)]
 pub struct Cublas {
-    handle: cublasHandle_t                         
+    handle: cublasHandle_t,
 }
 
 impl Cublas {
     fn with_stream(stream: &Stream) -> CudaResult<Self> {
         let mut handle: cublasHandle_t = std::ptr::null_mut();
-        let status = unsafe {
-            cublasCreate_v2(
-                &mut handle as *mut cublasHandle_t
-            )
-        };
+        let status = unsafe { cublasCreate_v2(&mut handle as *mut cublasHandle_t) };
         status.into_result()?;
-        let status = unsafe {
-            cublasSetStream_v2(
-                handle,
-                stream.as_mut_ptr()
-            )
-        };
+        let status = unsafe { cublasSetStream_v2(handle, stream.as_mut_ptr()) };
         status.into_result()?;
         Ok(Self { handle })
     }
@@ -93,36 +86,29 @@ impl Cublas {
 
 impl Drop for Cublas {
     fn drop(&mut self) {
-        let status = unsafe {
-            cublasDestroy_v2(self.handle)
-        };
-        status.into_result()
-            .unwrap(); 
+        let status = unsafe { cublasDestroy_v2(self.handle) };
+        status.into_result().unwrap();
     }
 }
 
 #[doc(hidden)]
 pub struct Cudnn {
-    handle: cudnnHandle_t
+    handle: cudnnHandle_t,
 }
 
 impl Cudnn {
     fn with_stream(stream: &Stream) -> CudaResult<Self> {
         let mut handle: cudnnHandle_t = std::ptr::null_mut();
-        let status = unsafe {
-            cudnnCreate(
-                &mut handle as *mut cudnnHandle_t
-            )
-        };
+        let status = unsafe { cudnnCreate(&mut handle as *mut cudnnHandle_t) };
         status.into_result()?;
         let status = unsafe {
             cudnnSetStream(
                 handle,
-                std::mem::transmute(stream.as_mut_ptr()) // cudart to cuda-cudnn-sys
+                std::mem::transmute(stream.as_mut_ptr()), // cudart to cuda-cudnn-sys
             )
         };
         status.into_result()?;
-        Ok(Self { handle })     
+        Ok(Self { handle })
     }
     unsafe fn as_mut_ptr(&self) -> cudnnHandle_t {
         self.handle
@@ -131,11 +117,8 @@ impl Cudnn {
 
 impl Drop for Cudnn {
     fn drop(&mut self) {
-        let status = unsafe {
-            cudnnDestroy(self.handle)
-        };
-        status.into_result()
-            .unwrap();
+        let status = unsafe { cudnnDestroy(self.handle) };
+        status.into_result().unwrap();
     }
 }
 
@@ -145,11 +128,11 @@ pub struct CudaGpuBase {
     kernels: Module,
     cublas: Cublas,
     cudnn: Cudnn,
-    context: Context
+    context: Context,
 }
 
 impl CudaGpuBase {
-    fn stream(&self) -> &Stream { 
+    fn stream(&self) -> &Stream {
         &self.stream
     }
     fn kernels(&self) -> &Module {
@@ -162,7 +145,7 @@ impl CudaGpuBase {
         &self.cudnn
     }
     fn context(&self) -> &Context {
-        &self.context 
+        &self.context
     }
 }
 
@@ -170,7 +153,7 @@ impl CudaGpuBase {
 pub struct CudaGpu {
     index: usize,
     device: CudaDevice,
-    base: Mutex<CudaGpuBase>
+    base: Mutex<CudaGpuBase>,
 }
 
 impl CudaGpu {
@@ -179,38 +162,35 @@ impl CudaGpu {
         rustacuda::init(CudaFlags::empty()).unwrap();
         let device = CudaDevice::get_device(index as u32).unwrap();
         let context = Context::create_and_push(ContextFlags::SCHED_AUTO, device).unwrap();
-        let stream = Stream::new(StreamFlags::DEFAULT, Some(0))
-            .expect("Unable to create Cuda Stream!");
+        let stream =
+            Stream::new(StreamFlags::DEFAULT, Some(0)).expect("Unable to create Cuda Stream!");
         let src = CString::new(include_str!("cuda/kernels.ptx")).unwrap();
         let kernels = Module::load_from_string(&src).unwrap();
-        let cublas = Cublas::with_stream(&stream)
-            .expect("Unable to create Cublas!");
-        let cudnn = Cudnn::with_stream(&stream)
-            .expect("Unable to create Cudnn!");
+        let cublas = Cublas::with_stream(&stream).expect("Unable to create Cublas!");
+        let cudnn = Cudnn::with_stream(&stream).expect("Unable to create Cudnn!");
         let base = Mutex::new(CudaGpuBase {
             stream,
             kernels,
             cublas,
             cudnn,
-            context
+            context,
         });
         Arc::new(Self {
             index,
             device,
-            base
+            base,
         })
     }
     fn lock(&self) -> LockResult<MutexGuard<CudaGpuBase>> {
-        self.base.lock()
+        self.base
+            .lock()
             .map(|base| {
-                CurrentContext::set_current(base.context())
-                    .expect("Unable to set CurrentContext!");
+                CurrentContext::set_current(base.context()).expect("Unable to set CurrentContext!");
                 base
             })
             .map_err(|e| {
                 let base = e.into_inner();
-                CurrentContext::set_current(base.context())
-                    .expect("Unable to set CurrentContext!");
+                CurrentContext::set_current(base.context()).expect("Unable to set CurrentContext!");
                 PoisonError::new(base)
             })
     }
@@ -236,15 +216,13 @@ pub struct CudaBuffer<T: Num> {
 
 impl<T: Num> CudaBuffer<T> {
     pub(super) unsafe fn uninitialized(gpu: &Arc<CudaGpu>, len: usize) -> Self {
-        gpu.lock()
-            .unwrap();
+        gpu.lock().unwrap();
         let data = DeviceBuffer::uninitialized(len).unwrap();
         let gpu = gpu.clone();
         Self { data, gpu }
     }
     pub(super) fn fill(&mut self, elem: T) {
-        self.gpu.lock()
-            .unwrap();
+        self.gpu.lock().unwrap();
         let p = unsafe { self.data.as_mut_ptr() as u64 };
         let len = self.data.len();
         let status = if TypeId::of::<T>() == TypeId::of::<u8>() {
@@ -266,8 +244,7 @@ impl<T: Num> CudaBuffer<T> {
         } else {
             unreachable!()
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
     pub(super) fn len(&self) -> usize {
         self.data.len()
@@ -285,8 +262,7 @@ impl<T: Num> CudaBuffer<T> {
         self.data.as_mut_ptr()
     }
     pub(super) fn to_vec(&self) -> Vec<T> {
-        self.gpu.lock()
-            .unwrap();
+        self.gpu.lock().unwrap();
         let mut vec = Vec::with_capacity(self.data.len());
         unsafe { vec.set_len(self.data.len()) };
         self.data.copy_to(&mut vec);
@@ -294,16 +270,14 @@ impl<T: Num> CudaBuffer<T> {
     }
     pub(super) fn copy_from_slice<'a>(&mut self, slice: impl Into<Cow<'a, [T]>>) {
         let slice = slice.into();
-        self.gpu.lock()
-            .unwrap();
+        self.gpu.lock().unwrap();
         self.data.copy_from(slice.as_ref()).unwrap();
     }
 }
 
 impl<T: Num> Clone for CudaBuffer<T> {
     fn clone(&self) -> Self {
-        self.gpu.lock()
-            .unwrap();
+        self.gpu.lock().unwrap();
         let mut output = unsafe { Self::uninitialized(&self.gpu, self.data.len()) };
         self.data.copy_to(&mut output.data);
         output
@@ -314,7 +288,7 @@ fn get_nblocks_nthreads(len: u32) -> (u32, u32) {
     const WARP_SIZE: u32 = 32;
     let nblocks = match len % WARP_SIZE {
         0 => len / WARP_SIZE,
-        _ => len / WARP_SIZE + 1
+        _ => len / WARP_SIZE + 1,
     };
     (nblocks, WARP_SIZE)
 }
@@ -327,15 +301,12 @@ impl TensorDescriptor {
     fn new_v2<D: IntoDimension>(dim: D, strides: Option<D>, data_type: cudnnDataType_t) -> Self {
         let mut tensor_descriptor = unsafe { std::ptr::null_mut() };
         let status = unsafe {
-            cudnnCreateTensorDescriptor(
-                &mut tensor_descriptor as *mut cudnnTensorDescriptor_t
-            )
+            cudnnCreateTensorDescriptor(&mut tensor_descriptor as *mut cudnnTensorDescriptor_t)
         };
-        status.into_result()
-            .unwrap();
-            
+        status.into_result().unwrap();
+
         let dim = dim.into_dimension();
-        
+
         if dim.ndim() <= 4 {
             fn to_nchw(slice: &[usize]) -> [i32; 4] {
                 match slice {
@@ -344,7 +315,7 @@ impl TensorDescriptor {
                     &[n, c] => [n as i32, c as i32, 1, 1],
                     &[c] => [1, c as i32, 1, 1],
                     &[] => [1, 1, 1, 1],
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             }
             let [n, c, h, w] = to_nchw(dim.slice());
@@ -356,25 +327,34 @@ impl TensorDescriptor {
                     cudnnSetTensor4dDescriptorEx(
                         tensor_descriptor,
                         data_type,
-                        n, c, h, w,
-                        ns, cs, hs, ws
-                    ).into_result()
-                        .unwrap();
+                        n,
+                        c,
+                        h,
+                        w,
+                        ns,
+                        cs,
+                        hs,
+                        ws,
+                    )
+                    .into_result()
+                    .unwrap();
                 }
-            }
-            else {
+            } else {
                 unsafe {
                     cudnnSetTensor4dDescriptor(
                         tensor_descriptor,
                         cudnnTensorFormat_t::CUDNN_TENSOR_NCHW,
-                        data_type, 
-                        n, c, h, w
-                    ).into_result()
-                        .unwrap();
+                        data_type,
+                        n,
+                        c,
+                        h,
+                        w,
+                    )
+                    .into_result()
+                    .unwrap();
                 }
             }
-        }
-        else {
+        } else {
             unimplemented!();
         }
 
@@ -451,8 +431,7 @@ impl TensorDescriptor {
 impl Drop for TensorDescriptor {
     fn drop(&mut self) {
         let status = unsafe { cudnnDestroyTensorDescriptor(self.tensor_descriptor) };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
 }
 
@@ -485,8 +464,7 @@ impl FilterDescriptor {
                     w,
                 )
             };
-            status.into_result()
-                .unwrap();
+            status.into_result().unwrap();
         } else {
             unimplemented!()
         }
@@ -500,8 +478,7 @@ impl FilterDescriptor {
 impl Drop for FilterDescriptor {
     fn drop(&mut self) {
         let status = unsafe { cudnnDestroyFilterDescriptor(self.filter_descriptor) };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
 }
 
@@ -510,22 +487,25 @@ struct OpTensorDescriptor {
 }
 
 impl OpTensorDescriptor {
-    fn new(op: cudnnOpTensorOp_t, data_type: cudnnDataType_t, nan_propagation: cudnnNanPropagation_t) -> Self {
+    fn new(
+        op: cudnnOpTensorOp_t,
+        data_type: cudnnDataType_t,
+        nan_propagation: cudnnNanPropagation_t,
+    ) -> Self {
         let mut op_tensor_descriptor: cudnnOpTensorDescriptor_t = std::ptr::null_mut();
         unsafe {
             cudnnCreateOpTensorDescriptor(
-                &mut op_tensor_descriptor as *mut cudnnOpTensorDescriptor_t
-            ).into_result()
-                .unwrap();
-            cudnnSetOpTensorDescriptor(
-                op_tensor_descriptor,
-                op,
-                data_type,
-                nan_propagation
-            ).into_result()
+                &mut op_tensor_descriptor as *mut cudnnOpTensorDescriptor_t,
+            )
+            .into_result()
+            .unwrap();
+            cudnnSetOpTensorDescriptor(op_tensor_descriptor, op, data_type, nan_propagation)
+                .into_result()
                 .unwrap();
         }
-        Self { op_tensor_descriptor }
+        Self {
+            op_tensor_descriptor,
+        }
     }
     unsafe fn as_mut_ptr(&self) -> cudnnOpTensorDescriptor_t {
         self.op_tensor_descriptor
@@ -535,8 +515,7 @@ impl OpTensorDescriptor {
 impl Drop for OpTensorDescriptor {
     fn drop(&mut self) {
         let status = unsafe { cudnnDestroyOpTensorDescriptor(self.op_tensor_descriptor) };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
 }
 
@@ -552,8 +531,7 @@ impl ConvolutionDescriptor {
                 &mut convolution_descriptor as *mut cudnnConvolutionDescriptor_t,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         let status = unsafe {
             cudnnSetConvolution2dDescriptor(
                 convolution_descriptor,
@@ -567,16 +545,14 @@ impl ConvolutionDescriptor {
                 data_type,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         Self {
             convolution_descriptor,
         }
     }
     fn set_math_type(&mut self, math_type: cudnnMathType_t) {
         let status = unsafe { cudnnSetConvolutionMathType(self.convolution_descriptor, math_type) };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
     unsafe fn as_mut_ptr(&self) -> cudnnConvolutionDescriptor_t {
         self.convolution_descriptor
@@ -599,8 +575,7 @@ impl ActivationDescriptor {
                 &mut activation_descriptor as *mut cudnnActivationDescriptor_t,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         let status = unsafe {
             cudnnSetActivationDescriptor(
                 activation_descriptor,
@@ -609,8 +584,7 @@ impl ActivationDescriptor {
                 coef.map_or(0., |c| c as f64),
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         Self {
             activation_descriptor,
         }
@@ -623,8 +597,7 @@ impl ActivationDescriptor {
 impl Drop for ConvolutionDescriptor {
     fn drop(&mut self) {
         let status = unsafe { cudnnDestroyConvolutionDescriptor(self.convolution_descriptor) };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
 }
 
@@ -642,8 +615,7 @@ impl PoolingDescriptor {
         let status = unsafe {
             cudnnCreatePoolingDescriptor(&mut pooling_descriptor as *mut cudnnPoolingDescriptor_t)
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         let status = unsafe {
             cudnnSetPooling2dDescriptor(
                 pooling_descriptor,
@@ -657,8 +629,7 @@ impl PoolingDescriptor {
                 args.strides[1] as i32,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         Self { pooling_descriptor }
     }
     unsafe fn as_mut_ptr(&self) -> cudnnPoolingDescriptor_t {
@@ -669,8 +640,7 @@ impl PoolingDescriptor {
 impl Drop for PoolingDescriptor {
     fn drop(&mut self) {
         let status = unsafe { cudnnDestroyPoolingDescriptor(self.pooling_descriptor) };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
 }
 
@@ -683,10 +653,7 @@ pub(super) fn unsigned_to_f32<
     input: &TensorBase<S1, D>,
     output: &mut TensorBase<S2, D>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let x = input.as_cuda_ptr().unwrap();
     let y = output.as_mut_cuda_ptr().unwrap();
     let len = input.len() as u32;
@@ -717,10 +684,7 @@ pub(super) fn unsigned_to_one_hot_f32<
 ) {
     let (batch_size, nclasses) = output.dim();
     debug_assert_eq!(batch_size, input.dim());
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let x = input.as_cuda_ptr().unwrap();
     let y = output.as_mut_cuda_ptr().unwrap();
     let nclasses = nclasses as u32;
@@ -747,17 +711,13 @@ pub(super) fn broadcast<T: Num, D: Dimension, S1: DataRef<Elem = T>, S2: DataMut
     input: &TensorBase<S1, D>,
     output: &mut TensorBase<S2, D::Larger>,
 ) {
-    let gpu = input.device()
-        .cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device().cuda().unwrap().lock().unwrap();
     let module = gpu.kernels();
     let stream = gpu.stream();
-    
+
     let x = input.as_cuda_ptr().unwrap();
     let y = output.as_mut_cuda_ptr().unwrap();
-    
+
     let c = input.len() as u32;
     let len = output.len() as u32;
     let (nblocks, nthreads) = get_nblocks_nthreads(len);
@@ -767,7 +727,8 @@ pub(super) fn broadcast<T: Num, D: Dimension, S1: DataRef<Elem = T>, S2: DataMut
                 DevicePointer::wrap(y),
                 c,
                 len
-        )).unwrap();
+        ))
+        .unwrap();
     }
 }
 
@@ -775,17 +736,13 @@ pub(super) fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32
     input_grad: &mut TensorBase<S1, D>,
     output_grad: &TensorBase<S2, D::Larger>,
 ) {
-    let gpu = output_grad.device()
-        .cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = output_grad.device().cuda().unwrap().lock().unwrap();
     let module = gpu.kernels();
     let stream = gpu.stream();
-    
+
     let dx = input_grad.as_mut_cuda_ptr().unwrap();
     let dy = output_grad.as_cuda_ptr().unwrap();
-    
+
     let c = input_grad.len() as u32;
     let len = output_grad.len() as u32;
     let (nblocks, nthreads) = get_nblocks_nthreads(len);
@@ -795,7 +752,8 @@ pub(super) fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32
                 DevicePointer::wrap(dy as *mut f32),
                 c,
                 len
-        )).unwrap();
+        ))
+        .unwrap();
     }
 }
 
@@ -832,10 +790,7 @@ pub(super) fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut
     };
     debug_assert_eq!(k1, k2);
     debug_assert_eq!((n, m), c.dim());
-    let gpu = a.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = a.device.cuda().unwrap().lock().unwrap();
     let cublas = gpu.cublas();
     let m = m as i32;
     let k = k1 as i32;
@@ -873,8 +828,7 @@ pub(super) fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut
             m,
         )
     };
-    status.into_result()
-            .unwrap();
+    status.into_result().unwrap();
 }
 
 pub(super) fn reduce_sum<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Dimension>(
@@ -882,10 +836,7 @@ pub(super) fn reduce_sum<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Di
     output: &mut TensorBase<S2, Ix0>,
 ) {
     // may want to test using TensorOps for sums
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let mut len = input.len() / (2 * 256);
     if (input.len() % (2 * 256)) > 0 {
         len += 1;
@@ -929,10 +880,7 @@ pub(super) fn relu<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Dimensio
     input: &TensorBase<S1, D>,
     output: &mut TensorBase<S2, D>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let x_desc = TensorDescriptor::new(input.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let x = input.as_cuda_ptr().unwrap();
     let y_desc = TensorDescriptor::new(output.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
@@ -954,8 +902,7 @@ pub(super) fn relu<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Dimensio
             y as *mut std::ffi::c_void,
         )
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 }
 
 pub(super) fn relu_backward<
@@ -968,10 +915,7 @@ pub(super) fn relu_backward<
     input_grad: &mut TensorBase<S2, D>,
     output_grad: &TensorBase<S3, D>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let cudnn = gpu.cudnn();
     let x_desc = TensorDescriptor::new(input.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let x = input.as_cuda_ptr().unwrap();
@@ -1000,8 +944,7 @@ pub(super) fn relu_backward<
             dx as *mut c_void,
         )
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 }
 
 pub(super) fn add<
@@ -1014,10 +957,7 @@ pub(super) fn add<
     rhs: &TensorBase<S2, D>,
     output: &mut TensorBase<S3, D>,
 ) {
-    let gpu = lhs.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = lhs.device.cuda().unwrap().lock().unwrap();
     let x1 = lhs.as_cuda_ptr().unwrap();
     let x2 = rhs.as_cuda_ptr().unwrap();
     let y = output.as_mut_cuda_ptr().unwrap();
@@ -1041,10 +981,7 @@ pub(super) fn scaled_add<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Di
     alpha: f32,
     rhs: &TensorBase<S2, D>,
 ) {
-    let gpu = rhs.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = rhs.device.cuda().unwrap().lock().unwrap();
     let cublas = gpu.cublas();
     let a = lhs.as_mut_cuda_ptr().unwrap();
     let alpha = unsafe { &alpha as *const f32 };
@@ -1064,10 +1001,7 @@ pub(super) fn cross_entropy<
     target: &TensorBase<S2, Ix2>,
     output: &mut TensorBase<S3, Ix2>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let stream = gpu.stream();
     let module = gpu.kernels();
     let (batch_size, nclasses) = input.dim();
@@ -1098,10 +1032,7 @@ pub(super) fn cross_entropy_backward<
     target: &TensorBase<S3, Ix2>,
     output_grad: &TensorBase<S4, Ix0>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let stream = gpu.stream();
     let module = gpu.kernels();
     let len = input.len() as u32;
@@ -1124,11 +1055,7 @@ pub(super) fn cross_entropy_backward<
 }
 
 fn reverse_conv2d_filter(input: &TensorView4<f32>, beta: f32, output: &mut TensorViewMut4<f32>) {
-    let gpu = input.device()
-        .cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device().cuda().unwrap().lock().unwrap();
     let stream = gpu.stream();
     let module = gpu.kernels();
     let (outputs, inputs, kh, kw) = input.dim();
@@ -1166,10 +1093,7 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
         reverse_conv2d_filter(&weight.view(), 0., &mut weight_reversed.view_mut());
         weight_reversed
     };
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let cudnn = gpu.cudnn();
     let w_desc = FilterDescriptor::new(weight.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let w = weight.as_cuda_ptr().unwrap();
@@ -1196,8 +1120,7 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
                 &mut perf as *mut cudnnConvolutionFwdAlgoPerf_t,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         assert_eq!(ret_algo_count, 1);
         perf.algo
     };
@@ -1213,11 +1136,8 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
             &mut workspace_size as *mut usize,
         )
     };
-    status.into_result()
-        .unwrap();
-    let mut workspace = unsafe {
-        DeviceBuffer::<u8>::uninitialized(workspace_size).unwrap()
-    };
+    status.into_result().unwrap();
+    let mut workspace = unsafe { DeviceBuffer::<u8>::uninitialized(workspace_size).unwrap() };
     let status: cudnnStatus_t = if let Some(bias) = &bias {
         let b_desc = TensorDescriptor::new([1, bias.dim()], cudnnDataType_t::CUDNN_DATA_FLOAT);
         let b = bias.as_cuda_ptr().unwrap();
@@ -1267,8 +1187,7 @@ pub(super) fn conv2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
             )
         }
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 }
 
 pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
@@ -1288,10 +1207,7 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
         reverse_conv2d_filter(&weight.view(), 0., &mut weight_reversed.view_mut());
         weight_reversed
     };
-    let gpu = weight.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = weight.device.cuda().unwrap().lock().unwrap();
     let cudnn = gpu.cudnn();
     let w_desc = FilterDescriptor::new(weight.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let w = weight.as_cuda_ptr().unwrap();
@@ -1316,8 +1232,7 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
                 &mut perf as *mut cudnnConvolutionBwdDataAlgoPerf_t,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         assert_eq!(ret_algo_count, 1);
         perf.algo
     };
@@ -1334,13 +1249,10 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
                 &mut workspace_size as *mut usize,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         workspace_size
     };
-    let mut workspace = unsafe {
-        DeviceBuffer::<u8>::uninitialized(workspace_size).unwrap()
-    };
+    let mut workspace = unsafe { DeviceBuffer::<u8>::uninitialized(workspace_size).unwrap() };
     let status = unsafe {
         cudnnConvolutionBackwardData(
             cudnn.as_mut_ptr(),
@@ -1358,8 +1270,7 @@ pub(super) fn conv2d_backward_input<S1: DataMut<Elem = f32>>(
             dx as *mut c_void,
         )
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 }
 
 pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
@@ -1370,11 +1281,8 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
     output_grad: &TensorView4<f32>,
 ) {
     let mut weight_grad_reversed = Tensor::zeros(weight_grad.device(), weight_grad.raw_dim());
-    
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let cudnn = gpu.cudnn();
     let x_desc = TensorDescriptor::new(input.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let x = input.as_cuda_ptr().unwrap();
@@ -1420,13 +1328,10 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
                 &mut workspace_size as *mut usize,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
         workspace_size
     };
-    let mut workspace = unsafe {
-        DeviceBuffer::<u8>::uninitialized(workspace_size).unwrap()
-    };
+    let mut workspace = unsafe { DeviceBuffer::<u8>::uninitialized(workspace_size).unwrap() };
 
     let status = unsafe {
         cudnnConvolutionBackwardFilter(
@@ -1445,8 +1350,7 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
             dw as *mut c_void,
         )
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 
     if let Some(bias_grad) = bias_grad {
         let db_desc = TensorDescriptor::new(
@@ -1465,12 +1369,11 @@ pub(super) fn conv2d_backward_weight_bias<S1: DataRef<Elem = f32>>(
                 db as *mut c_void,
             )
         };
-        status.into_result()
-            .unwrap();
+        status.into_result().unwrap();
     }
-    
+
     std::mem::drop(gpu);
-    
+
     // apply reversed filter back to weight_grad
     reverse_conv2d_filter(
         &weight_grad_reversed.view(),
@@ -1484,10 +1387,7 @@ pub(super) fn max_pool2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
     args: &Pool2dArgs,
     output: &mut TensorBase<S2, Ix4>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let cudnn = gpu.cudnn();
     let x_desc = TensorDescriptor::new(input.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let x = input.as_cuda_ptr().unwrap();
@@ -1510,8 +1410,7 @@ pub(super) fn max_pool2d<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>>(
             y as *mut c_void,
         )
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 }
 
 pub(super) fn max_pool2d_backward<
@@ -1524,10 +1423,7 @@ pub(super) fn max_pool2d_backward<
     args: &Pool2dArgs,
     output_grad: &TensorBase<S3, Ix4>,
 ) {
-    let gpu = input.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+    let gpu = input.device.cuda().unwrap().lock().unwrap();
     let cudnn = gpu.cudnn();
     let x_desc = TensorDescriptor::new(input.dim.slice(), cudnnDataType_t::CUDNN_DATA_FLOAT);
     let x = input.as_cuda_ptr().unwrap();
@@ -1556,18 +1452,22 @@ pub(super) fn max_pool2d_backward<
             dx as *mut c_void,
         )
     };
-    status.into_result()
-        .unwrap();
+    status.into_result().unwrap();
 }
 
-pub(super) fn sgd_with_momentum<S1: DataMut<Elem=f32>, S2: DataRef<Elem=f32>, S3: DataMut<Elem=f32>, D: Dimension>
-    (weight: &mut TensorBase<S1, D>, weight_grad: &TensorBase<S2, D>,
-     learning_rate: f32, momentum: f32,
-     velocity: &mut TensorBase<S3, D>) {
-    let gpu = weight_grad.device.cuda()
-        .unwrap()
-        .lock()
-        .unwrap();
+pub(super) fn sgd_with_momentum<
+    S1: DataMut<Elem = f32>,
+    S2: DataRef<Elem = f32>,
+    S3: DataMut<Elem = f32>,
+    D: Dimension,
+>(
+    weight: &mut TensorBase<S1, D>,
+    weight_grad: &TensorBase<S2, D>,
+    learning_rate: f32,
+    momentum: f32,
+    velocity: &mut TensorBase<S3, D>,
+) {
+    let gpu = weight_grad.device.cuda().unwrap().lock().unwrap();
     let stream = gpu.stream();
     let module = gpu.kernels();
     let len = weight.len() as u32;
@@ -1579,10 +1479,11 @@ pub(super) fn sgd_with_momentum<S1: DataMut<Elem=f32>, S2: DataRef<Elem=f32>, S3
         launch!(module.sgd_with_momentum<<<nblocks, nthreads, 0, stream>>>(
           DevicePointer::wrap(w),
           DevicePointer::wrap(dw as *mut f32),
-          learning_rate, 
+          learning_rate,
           momentum,
           DevicePointer::wrap(v),
           len
-        )).unwrap();
+        ))
+        .unwrap();
     }
 }

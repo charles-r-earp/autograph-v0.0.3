@@ -1,10 +1,13 @@
-use std::{fmt::{self, Debug, Display}, error::Error};
-use super::{cudaError_t, cublasStatus_t, cudnnStatus_t};
+use super::{cublasStatus_t, cudaError_t, cudnnStatus_t};
+use std::{
+    error::Error,
+    fmt::{self, Debug, Display},
+};
 
 pub(super) enum CudaError {
     CudaError(cudaError_t),
     CublasStatus(cublasStatus_t),
-    CudnnStatus(cudnnStatus_t)
+    CudnnStatus(cudnnStatus_t),
 }
 
 impl From<cudaError_t> for CudaError {
@@ -30,7 +33,7 @@ impl Debug for CudaError {
         match self {
             CudaError::CudaError(e) => e.fmt(f),
             CudaError::CublasStatus(s) => s.fmt(f),
-            CudaError::CudnnStatus(s) => s.fmt(f)
+            CudaError::CudnnStatus(s) => s.fmt(f),
         }
     }
 }
@@ -59,7 +62,7 @@ impl IntoResult for cudaError_t {
     fn into_result(self) -> Result<(), Self::Error> {
         match self {
             cudaError_t::CUDA_SUCCESS => Ok(()),
-            _ => Err(self.into())
+            _ => Err(self.into()),
         }
     }
 }
@@ -69,7 +72,7 @@ impl IntoResult for cublasStatus_t {
     fn into_result(self) -> Result<(), Self::Error> {
         match self {
             cublasStatus_t::SUCCESS => Ok(()),
-            _ => Err(self.into())
+            _ => Err(self.into()),
         }
     }
 }
@@ -79,7 +82,7 @@ impl IntoResult for cudnnStatus_t {
     fn into_result(self) -> Result<(), Self::Error> {
         match self {
             cudnnStatus_t::CUDNN_STATUS_SUCCESS => Ok(()),
-            _ => Err(self.into())
+            _ => Err(self.into()),
         }
     }
 }

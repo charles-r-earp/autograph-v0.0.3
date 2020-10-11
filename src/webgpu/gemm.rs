@@ -1,5 +1,5 @@
+use super::{shader_to_spirv, WebBuffer};
 use crate::Num;
-use super::{WebBuffer, shader_to_spirv};
 use bytemuck::{Pod, Zeroable};
 
 use std::error::Error;
@@ -8,7 +8,7 @@ use std::error::Error;
 pub(super) struct Shape2d {
     dim: [u32; 2],
     offset: u32,
-    strides: [i32; 2],   
+    strides: [i32; 2],
 }
 
 impl Shape2d {
@@ -20,7 +20,7 @@ impl Shape2d {
             offset,
             strides,
         }
-    } 
+    }
     pub(super) fn t(mut self) -> Self {
         let dim = [self.dim[1], self.dim[0]];
         self.dim = dim;
@@ -45,7 +45,7 @@ pub(super) struct Gemm<'a, 'b, 'c, T: Num> {
     b_shape: Shape2d,
     beta: T,
     c: &'c mut WebBuffer<T>,
-    c_shape: Shape2d
+    c_shape: Shape2d,
 }
 
 #[repr(C, packed(4))]
@@ -61,7 +61,7 @@ struct GemmPushConstsV1<T: Num> {
     beta: T,
     offc: u32,
     rsc: i32,
-    csc: i32
+    csc: i32,
 }
 
 unsafe impl<T: Num> Zeroable for GemmPushConstsV1<T> {}
@@ -78,8 +78,12 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
             b_shape: Shape2d::default(),
             beta: T::zero(),
             c,
-            c_shape: Shape2d::default()
+            c_shape: Shape2d::default(),
         }
+    }
+    pub(super) fn alpha(mut self, alpha: T) -> Self {
+        self.alpha = alpha;
+        self
     }
     pub(super) fn a_shape(mut self, a_shape: Shape2d) -> Self {
         self.a_shape = a_shape;
@@ -89,11 +93,15 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
         self.b_shape = b_shape;
         self
     }
+    pub(super) fn beta(mut self, beta: T) -> Self {
+        self.beta = beta;
+        self
+    }
     pub(super) fn c_shape(mut self, c_shape: Shape2d) -> Self {
         self.c_shape = c_shape;
         self
     }
-    pub(super) fn exec_v1(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(super) fn exec_v1(&mut self) {
         let a_shape = &self.a_shape;
         let [m, k] = a_shape.dim;
         let b_shape = &self.b_shape;
@@ -103,42 +111,38 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
         let [m2, n2] = c_shape.dim;
         assert_eq!(m, m2);
         assert_eq!(n, n2);
-        
+
         let ts = 32;
-        
+
         let m_tile = ts;
         let k_tile = ts;
         let n_tile = ts;
-        
+
         let work_size_x = if m < m_tile {
             1
-        }
-        else if m % m_tile == 0 {
+        } else if m % m_tile == 0 {
             m / m_tile
-        }
-        else {
+        } else {
             m / m_tile + 1
-        }; 
-        
+        };
+
         let work_size_y = if n < m_tile {
             1
-        } 
-        else if n % n_tile == 0 {
+        } else if n % n_tile == 0 {
             n / n_tile
-        }
-        else {
+        } else {
             n / n_tile + 1
         };
-        
+
         let offa = a_shape.offset;
         let [rsa, csa] = a_shape.strides;
-        
+
         let offb = b_shape.offset;
         let [rsb, csb] = b_shape.strides;
-        
+
         let offc = c_shape.offset;
         let [rsc, csc] = c_shape.strides;
-        
+
         let push_constants = &[GemmPushConstsV1 {
             alpha: self.alpha,
             offa,
@@ -150,27 +154,25 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
             beta: self.beta,
             offc,
             rsc,
-            csc
+            csc,
         }];
-        
-        //dbg!(push_constants);
-        
+
         let push_constants = bytemuck::cast_slice(push_constants);
-        
+
         let src = include_str!("gemm/gemm_v1.comp");
-        
+
         let a = &self.a;
         let gpu = &a.gpu;
-        assert_eq!(a.len as u32, m*k);
+        assert_eq!(a.len as u32, m * k);
         let a = &a.buffer;
-        
+
         let b = &self.b;
-        assert_eq!(b.len as u32, k*n);
+        assert_eq!(b.len as u32, k * n);
         let b = &b.buffer;
         let mut c = &mut self.c;
-        assert_eq!(c.len as u32, m*n);
+        assert_eq!(c.len as u32, m * n);
         let c = &mut c.buffer;
-        
+
         let shader_name = format!(
             "gemm_v1_{}__{}_{}_{}__{}_{}_{}",
             T::type_name(),
@@ -181,83 +183,89 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
             k_tile,
             n_tile
         );
-        
+
         let device = &gpu.device;
-        
-        let shader = gpu.shader(&shader_name, || {
-            let mut source = String::new();
-            source.push_str("#version 450\n");
-            source.push_str(&format!("#define T {}\n", T::shader_type()));
-            source.push_str(&format!("#define M {}\n", m));
-            source.push_str(&format!("#define K {}\n", k));
-            source.push_str(&format!("#define N {}\n", n));
-            source.push_str(&format!("#define M_TILE {}\n", m_tile));
-            source.push_str(&format!("#define K_TILE {}\n", k_tile));
-            source.push_str(&format!("#define N_TILE {}\n", n_tile));
-            source.push_str(src);
-            println!("{}", &source); 
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
-        })?;
-        
+
+        let shader = gpu
+            .shader(&shader_name, || {
+                let mut source = String::new();
+                source.push_str("#version 450\n");
+                source.push_str(&format!("#define T {}\n", T::shader_type()));
+                source.push_str(&format!("#define M {}\n", m));
+                source.push_str(&format!("#define K {}\n", k));
+                source.push_str(&format!("#define N {}\n", n));
+                source.push_str(&format!("#define M_TILE {}\n", m_tile));
+                source.push_str(&format!("#define K_TILE {}\n", k_tile));
+                source.push_str(&format!("#define N_TILE {}\n", n_tile));
+                source.push_str(src);
+                println!("{}", &source);
+                let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
+                Ok(device.create_shader_module(spirv))
+            })
+            .unwrap();
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::COMPUTE,
+                    ty: wgpu::BindingType::StorageBuffer {
+                        dynamic: false,
+                        readonly: true,
+                        min_binding_size: wgpu::BufferSize::new(4),
+                    },
+                    count: None,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStage::COMPUTE,
+                    ty: wgpu::BindingType::StorageBuffer {
+                        dynamic: false,
+                        readonly: true,
+                        min_binding_size: wgpu::BufferSize::new(4),
+                    },
+                    count: None,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStage::COMPUTE,
+                    ty: wgpu::BindingType::StorageBuffer {
+                        dynamic: false,
+                        readonly: false,
+                        min_binding_size: wgpu::BufferSize::new(4),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+            ],
         });
-        
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(a.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(b.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(c.slice(..)),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(a.slice(..)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(b.slice(..)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(c.slice(..)),
+                },
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..(push_constants.len()*4) as u32
-        }],
+                stages: wgpu::ShaderStage::COMPUTE,
+                range: 0..(push_constants.len() * 4) as u32,
+            }],
         });
 
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -268,7 +276,7 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
                 entry_point: "main",
             },
         });
-        
+
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
@@ -278,13 +286,7 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
             cpass.set_push_constants(0, &push_constants);
             cpass.dispatch(work_size_x as _, work_size_y as _, 1);
         }
-        
+
         gpu.queue.submit(Some(encoder.finish()));
-        
-        Ok(())
     }
 }
-
-
-
-

@@ -1,7 +1,7 @@
 #![allow(warnings)]
 use argparse::{ArgumentParser, Store, StoreTrue};
-use autograph::nn::autograd::{Graph, Parameter, Variable};
 use autograph::datasets::Mnist; // requires feature "datasets"
+use autograph::nn::autograd::{Graph, Parameter, Variable};
 use autograph::utils::classification_accuracy;
 use autograph::{ArcTensor, Cpu, Device, RwTensor, Tensor};
 use num_traits::ToPrimitive;
@@ -43,7 +43,7 @@ fn main() {
 
     // Construct a device that will be used to create Tensors
     // Devices can be created with the From trait
-    // ie Device::from(Cpu::new()) 
+    // ie Device::from(Cpu::new())
     // or Device::from(CudaGpu::new(index))
     // Default returns a CudaGpu if cuda is enabled, otherwise a Cpu
     let device = Device::default();
