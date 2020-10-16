@@ -1,0 +1,60 @@
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(set = 0, binding = 0) readonly buffer X {
+    T[] x;
+};
+
+layout(set = 0, binding = 1) writeonly buffer Y {
+    T[] y;
+};
+
+layout(push_constant) uniform PushConsts {
+    uint len;
+};
+
+shared T[2 * LOCAL_SIZE] partial; 
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+    uint start = 2 * wid * LOCAL_SIZE;
+    
+    memoryBarrierShared();
+    if ((start + lid) < len)
+    {
+        partial[lid] = x[start + lid];      
+    }
+    else
+    {       
+        partial[lid] = 0;
+    }
+    if ((start + LOCAL_SIZE + lid) < len)
+    {   
+        partial[LOCAL_SIZE + lid] = x[start + LOCAL_SIZE + lid];
+    }
+    else
+    {
+        partial[LOCAL_SIZE + lid] = 0;
+    }
+    barrier();
+    
+    memoryBarrierShared();
+    // Traverse reduction tree
+    #pragma unroll
+    for (uint i = LOCAL_SIZE; i > 0; i /= 2)
+    {
+        
+        if (lid < i) {
+            partial[lid] += partial[lid + i];
+        }
+    }
+    barrier();
+
+    // Write the computed sum of the block to the output vector at correct index
+    if (lid == 0 && (gid*2) < len)
+    {
+        y[wid] = partial[lid];
+    }
+}

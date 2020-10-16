@@ -1,0 +1,29 @@
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(set = 0, binding = 0) buffer DX {
+    T[] dx;
+};
+
+layout(set = 0, binding = 1) readonly buffer DY {
+    T[] dy;
+};
+
+layout(push_constant) uniform PushConsts {
+    uint len;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    
+    T acc = 0;
+    
+    if (tid < len) {
+        #pragma unroll
+        for(int i = 0; i < C; ++i) {
+            acc += dy[tid + i * C];
+        }
+            
+        dx[tid] += acc;
+    }
+}

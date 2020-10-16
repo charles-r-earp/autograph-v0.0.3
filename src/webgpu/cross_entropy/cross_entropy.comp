@@ -1,0 +1,53 @@
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(set = 0, binding = 0) readonly buffer X {
+    T[] x;
+};
+
+layout(set = 0, binding = 1) readonly buffer Target {
+    T[] t;
+};
+
+layout(set = 0, binding = 2) writeonly buffer Y {
+    T[] y;
+};
+
+layout(push_constant) uniform PushConsts {
+    uint batch_size;
+};
+
+
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint index = tid * C;
+    T q;
+    T[C] tmp;
+    if (tid < batch_size) {
+        // compute max value of slice
+        q = x[index];
+        #pragma unroll
+        for(int i = 1; i < C; ++i) {
+            q = max(x[index + i], q);
+        } 
+        // subtract max
+        #pragma unroll
+        for(int i = 0; i < C; ++i) {
+            tmp[i] = x[index + i] - q;
+        }
+        q = 0;
+        // sum
+        #pragma unroll
+        for(int i = 0; i < C; ++i) {
+          q += exp(tmp[i]);
+        }
+        // compute ln(q)
+        q = log(q);
+        // y = (ln_q - y) * t
+        #pragma unroll
+        for(int i = 0; i < C; ++i) {
+            y[index + i] = (q - tmp[i]) * t[index + i];
+        }
+    }
+}

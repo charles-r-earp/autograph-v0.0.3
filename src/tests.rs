@@ -41,6 +41,11 @@ fn test_u8_to_f32_cpu() {
 fn test_u8_to_f32_cuda() {
     test_u8_to_f32(CudaGpu::new(0));
 }
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_u8_to_f32_web() {
+    test_u8_to_f32(WebGpu::new(0));
+}
 fn test_u8_to_one_hot_f32(device: impl Into<Device>) {
     let device = device.into();
     let vec: Vec<u8> = vec![1, 2, 3, 4, 5, 6];
@@ -66,6 +71,11 @@ fn test_u8_to_one_hot_f32_cpu() {
 fn test_u8_to_one_hot_f32_cuda() {
     test_u8_to_one_hot_f32(CudaGpu::new(0));
 }
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_u8_to_one_hot_f32_web() {
+    test_u8_to_one_hot_f32(WebGpu::new(0));
+}
 fn test_fill_u8(device: impl Into<Device>) {
     let device = device.into();
     let n = 10;
@@ -83,6 +93,11 @@ fn test_fill_u8_cpu() {
 fn test_fill_u8_cuda() {
     test_fill_u8(CudaGpu::new(0));
 }
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_fill_u8_web() {
+    test_fill_u8(WebGpu::new(0));
+}
 fn test_fill_f32(device: impl Into<Device>) {
     let device = device.into();
     let n = 10;
@@ -99,6 +114,11 @@ fn test_fill_f32_cpu() {
 #[test]
 fn test_fill_f32_cuda() {
     test_fill_f32(CudaGpu::new(0));
+}
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_fill_f32_web() {
+    test_fill_f32(WebGpu::new(0));
 }
 fn test_broadcast(device: impl Into<Device>) {
     let device = device.into();
@@ -118,6 +138,11 @@ fn test_broadcast_cpu() {
 fn test_broadcast_cuda() {
     test_broadcast(CudaGpu::new(0));
 }
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_broadcast_web() {
+    test_broadcast(WebGpu::new(0));
+}
 fn test_broadcast_backward(device: impl Into<Device>) {
     let device = device.into();
     let mut dx = Tensor::zeros(&device, 4);
@@ -135,6 +160,11 @@ fn test_broadcast_backward_cpu() {
 #[test]
 fn test_broadcast_backward_cuda() {
     test_broadcast_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_broadcast_backward_web() {
+    test_broadcast_backward(WebGpu::new(0));
 }
 fn compare_vectors(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) {
     // dnnl and cuda have fast mul / approx ops
@@ -270,7 +300,7 @@ fn test_dense_cpu() {
 fn test_sum(device: impl Into<Device>) {
     let device = device.into();
 
-    let vec: Vec<f32> = (1..=100).into_iter().map(|x| x.to_f32().unwrap()).collect();
+    let vec: Vec<f32> = (1..=1000).into_iter().map(|x| x.to_f32().unwrap()).collect();
 
     let x = Tensor::from_shape_vec(&device, vec.len(), &vec);
     let y = x.sum().as_slice()[0];
@@ -284,6 +314,11 @@ fn test_sum_cpu() {
 #[test]
 fn test_sum_cuda() {
     test_sum(CudaGpu::new(0));
+}
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_sum_web() {
+    test_sum(WebGpu::new(0));
 }
 fn test_relu(device: impl Into<Device>) {
     let device = device.into();
@@ -354,14 +389,14 @@ fn test_add_cuda() {
 fn test_scaled_add(device: impl Into<Device>) {
     let device = device.into();
 
-    let mut lhs = Tensor::zeros(&device, 10);
+    let mut lhs = Tensor::ones(&device, 10);
     let rhs = Tensor::from_shape_vec(&device, 10, vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]);
 
     let alpha = 2.;
 
     lhs.scaled_add(alpha, &rhs);
 
-    let mut lhs_true = Array::zeros(lhs.raw_dim());
+    let mut lhs_true = Array::ones(lhs.raw_dim());
     lhs_true.scaled_add(alpha, &rhs.as_array());
 
     let success = lhs
@@ -375,6 +410,20 @@ fn test_scaled_add(device: impl Into<Device>) {
         lhs.as_slice(),
         lhs_true.as_slice().unwrap()
     );
+}
+#[test]
+fn test_scaled_add_cpu() {
+    test_scaled_add(Cpu::new());
+}
+#[cfg(feature = "cuda")]
+#[test]
+fn test_scaled_add_cuda() {
+    test_scaled_add(CudaGpu::new(0));
+}
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_scaled_add_web() {
+    test_scaled_add(WebGpu::new(0));
 }
 fn test_cross_entropy(device: impl Into<Device>) {
     let device = device.into();
@@ -395,18 +444,7 @@ fn test_cross_entropy(device: impl Into<Device>) {
     );
 
     let mut output = Tensor::zeros(&device, [batch_size, nclasses]);
-
-    match &device {
-        Device::Cpu(_) => {
-            cpu::cross_entropy(&input, &target, &mut output);
-        }
-        #[cfg(feature = "cuda")]
-        Device::Cuda(_) => {
-            cuda::cross_entropy(&input, &target, &mut output);
-        }
-        #[cfg(feature = "webgpu")]
-        Device::Web(_) => unimplemented!(),
-    }
+    cross_entropy(&input, &target, &mut output);
 
     let mut output_true = vec![0.; batch_size * nclasses];
     input
@@ -443,6 +481,11 @@ fn test_cross_entropy_cpu() {
 #[test]
 fn test_cross_entropy_cuda() {
     test_cross_entropy(CudaGpu::new(0));
+}
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_cross_entropy_web() {
+    test_cross_entropy(WebGpu::new(0));
 }
 fn test_cross_entropy_backward(device: impl Into<Device>) {
     let device = device.into();
@@ -492,6 +535,11 @@ fn test_cross_entropy_backward_cpu() {
 #[test]
 fn test_cross_entropy_backward_cuda() {
     test_cross_entropy_backward(CudaGpu::new(0));
+}
+#[cfg(feature = "webgpu")]
+#[test]
+fn test_cross_entropy_backward_web() {
+    test_cross_entropy_backward(WebGpu::new(0));
 }
 fn test_conv2d_with_args(
     input_dim: impl IntoDimension<Dim = Ix4>,

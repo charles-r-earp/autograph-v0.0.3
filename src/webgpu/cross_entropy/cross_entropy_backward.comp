@@ -1,0 +1,30 @@
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(set = 0, binding = 0) readonly buffer X {
+    T[] x;
+};
+
+layout(set = 0, binding = 1) buffer DX {
+    T[] dx;
+};
+
+layout(set = 0, binding = 2) readonly buffer Target {
+    T[] t;
+};
+
+layout(set = 0, binding = 3) readonly buffer DY {
+    T[] y;
+};
+
+layout(push_constant) uniform PushConsts {
+    uint len;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    
+    if (tid < len) {
+        dx[tid] += y[0] * (x[tid] - t[tid]);
+    }
+}

@@ -777,7 +777,7 @@ impl<S: DataRef<Elem = f32>, D: Dimension> TensorBase<S, D> {
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::reduce_sum(self, &mut output),
             #[cfg(feature = "webgpu")]
-            Device::Web(web_gpu) => unimplemented!(),
+            Device::Web(web_gpu) => webgpu::reduce_sum(self, &mut output),
         }
         output
     }
@@ -818,7 +818,14 @@ impl<S: DataMut<Elem = f32>, D: Dimension> TensorBase<S, D> {
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::scaled_add(self, alpha, rhs),
             #[cfg(feature = "webgpu")]
-            Device::Web(web_gpu) => unimplemented!(),
+            Device::Web(web_gpu) => //{
+                webgpu::scaled_add(self, alpha, rhs),
+                /*let device = Device::from(Cpu::new());
+                let mut lhs_cpu = Tensor::from_shape_vec(&device, self.raw_dim(), self.as_slice());
+                let rhs_cpu = Tensor::from_shape_vec(&device, rhs.raw_dim(), rhs.as_slice());
+                cpu::scaled_add(&mut lhs_cpu, alpha, &rhs_cpu);
+                self.copy_from_slice(lhs_cpu.as_slice());*/
+            //}, 
         }
     }
 }
@@ -835,7 +842,7 @@ impl<T: Unsigned, S: DataRef<Elem = T>, D: Dimension> TensorBase<S, D> {
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_f32(self, &mut output),
             #[cfg(feature = "webgpu")]
-            Device::Web(web_gpu) => unimplemented!(),
+            Device::Web(web_gpu) => webgpu::unsigned_to_f32(self, &mut output),
         }
         output
     }
@@ -851,7 +858,7 @@ impl<T: Unsigned, S: DataRef<Elem = T>> TensorBase<S, Ix1> {
             #[cfg(feature = "cuda")]
             Device::Cuda(cuda_gpu) => cuda::unsigned_to_one_hot_f32(self, &mut output),
             #[cfg(feature = "webgpu")]
-            Device::Web(web_gpu) => unimplemented!(),
+            Device::Web(web_gpu) => webgpu::unsigned_to_one_hot_f32(self, &mut output),
         }
         output
     }
@@ -983,7 +990,7 @@ fn broadcast<S1: DataRef<Elem = f32>, S2: DataMut<Elem = f32>, D: Dimension>(
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast(input, output),
         #[cfg(feature = "webgpu")]
-        Device::Web(web_gpu) => unimplemented!(),
+        Device::Web(web_gpu) => webgpu::broadcast(input, output),
     }
 }
 
@@ -997,7 +1004,7 @@ fn broadcast_backward<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Dimen
         #[cfg(feature = "cuda")]
         Device::Cuda(cuda_gpu) => cuda::broadcast_backward(input_grad, output_grad),
         #[cfg(feature = "webgpu")]
-        Device::Web(web_gpu) => unimplemented!(),
+        Device::Web(web_gpu) => webgpu::broadcast_backward(input_grad, output_grad),
     }
 }
 
@@ -1074,7 +1081,8 @@ fn cross_entropy_backward<
             cuda::cross_entropy_backward(input, input_grad, target, output_grad)
         }
         #[cfg(feature = "webgpu")]
-        Device::Web(web_gpu) => unimplemented!(),
+        Device::Web(web_gpu) =>
+            webgpu::cross_entropy_backward(input, input_grad, target, output_grad),
     }
 }
 
@@ -1122,14 +1130,26 @@ impl<S1: DataRef<Elem = f32>> TensorBase<S1, Ix2> {
         debug_assert_eq!(&self.device, &target.device);
         debug_assert_eq!(self.raw_dim(), target.raw_dim());
         let mut output = unsafe { Tensor::uninitialized(&self.device, self.raw_dim()) };
-        match &self.device {
-            Device::Cpu(cpu) => cpu::cross_entropy(self, target, &mut output),
-            #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_gpu) => cuda::cross_entropy(self, target, &mut output),
-            #[cfg(feature = "webgpu")]
-            Device::Web(web_gpu) => unimplemented!(),
-        }
+        cross_entropy(self, target, &mut output);        
         output.sum()
+    }
+}
+
+fn cross_entropy<
+    S1: DataRef<Elem = f32>,
+    S2: DataRef<Elem = f32>,
+    S3: DataMut<Elem = f32>,
+>(
+    input: &TensorBase<S1, Ix2>,
+    target: &TensorBase<S2, Ix2>,
+    output: &mut TensorBase<S3, Ix2>,
+) {
+    match &input.device {
+        Device::Cpu(cpu) => cpu::cross_entropy(input, target, output),
+        #[cfg(feature = "cuda")]
+        Device::Cuda(cuda_gpu) => cuda::cross_entropy(input, target, output),
+        #[cfg(feature = "webgpu")]
+        Device::Web(web_gpu) => webgpu::cross_entropy(input, target, output),
     }
 }
 

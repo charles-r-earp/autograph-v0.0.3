@@ -1,0 +1,40 @@
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(set = 0, binding = 0) readonly buffer X {
+    T1[] x;
+};
+
+layout(set = 0, binding = 1) writeonly buffer Y {
+    T2[] y;
+};
+
+layout(push_constant) uniform PushConsts {
+    uint len;
+    uint nclasses;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    
+    if (tid < len) {
+        #ifdef T1_BYTE
+        uint index = (tid + 4) % 4;
+        T1 item = x[tid / 4] >> (index * 8);
+        T1 val = 0;
+        
+        #pragma unroll
+        for(int i = 0; i < 8; ++i) {
+            val += item & (1 << i);
+        }
+        #else
+        T2 val = x[tid];
+        #endif
+    
+        #ifdef ONE_HOT 
+        y[tid * nclasses + val] = 1;
+        #else 
+        y[tid] = SCALE * val;
+        #endif
+    }
+}

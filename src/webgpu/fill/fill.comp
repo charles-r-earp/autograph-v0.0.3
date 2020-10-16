@@ -1,5 +1,5 @@
 
-layout(local_size_x = 1024) in;
+layout(local_size_x = LOCAL_SIZE) in;
 
 layout(set = 0, binding = 0) writeonly buffer Y {
     T[] y;

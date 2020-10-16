@@ -198,7 +198,6 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
                 source.push_str(&format!("#define K_TILE {}\n", k_tile));
                 source.push_str(&format!("#define N_TILE {}\n", n_tile));
                 source.push_str(src);
-                println!("{}", &source);
                 let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
                 Ok(device.create_shader_module(spirv))
             })
