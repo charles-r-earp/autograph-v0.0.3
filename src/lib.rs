@@ -600,7 +600,7 @@ impl<T: Num, S: DataOwned<Elem = T>, D: Dimension> TensorBase<S, D> {
     /// Unsafe: Rust generally marks these kinds of functions unsafe because reading uninitialized data is undefined behavior
     /// Num is only implemented for types which are safe to read arbitrary bits, so generally this is safe
     /// Use this prior an operation that will only write to the tensor and not read from it
-    unsafe fn uninitialized(device: &Device, shape: impl IntoDimension<Dim = D>) -> Self {
+    pub unsafe fn uninitialized(device: &Device, shape: impl IntoDimension<Dim = D>) -> Self {
         let device = device.clone();
         let dim = shape.into_dimension();
         let data = S::from_buffer(Buffer::uninitialized(&device, dim.size()));

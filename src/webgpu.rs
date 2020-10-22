@@ -6,14 +6,13 @@ use std::error::Error;
 use std::fmt::{self, Debug, Display};
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, LockResult};
 use std::any::TypeId;
 use std::mem::ManuallyDrop;
 use wgpu::{
-    Adapter, BackendBit, Buffer as WgpuBuffer, BufferUsage, CommandBuffer, Device as WgpuDevice,
-    Instance, Queue, ShaderModule, ShaderModuleSource,
+    Adapter, BackendBit, Buffer as WgpuBuffer, BufferSlice as WgpuBufferSlice, BufferUsage, CommandBuffer, Device as WgpuDevice,
+    Instance, Queue, ShaderModule, ShaderModuleSource, ComputePipeline, BindGroup, BindGroupLayout, ComputePass, CommandEncoder,
 };
-use wgpu::{BindGroup, ComputePipeline};
 
 mod gemm;
 use gemm::{Gemm, Shape2d};
@@ -41,26 +40,70 @@ impl WebType for f32 {
     }
 }
 
-struct ShaderReadGuard<'a> {
-    shaders: RwLockReadGuard<'a, HashMap<String, ShaderModule>>,
-    shader: &'a ShaderModule,
+struct ComputeDescriptor {
+    bind_group_layout: BindGroupLayout,
+    compute_pipeline: ComputePipeline,
 }
 
-impl<'a> Deref for ShaderReadGuard<'a> {
-    type Target = ShaderModule;
-    fn deref(&self) -> &ShaderModule {
-        &*self.shader
+struct ComputeTaskBuilder<'a, F> {
+    key: String,
+    source_fn: Option<F>,
+    slices: &'a [WgpuBufferSlice<'a>],
+    push_constants: [u32; 128/4],
+    push_constant_size: usize,
+    work_groups: [u32; 3],
+}   
+
+impl<'a, F: Fn() -> String> ComputeTaskBuilder<'a, F> {
+    fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            source_fn: None, 
+            slices: &[],
+            push_constants: unsafe { std::mem::uninitialized() },
+            push_constant_size: 0,
+            work_groups: [1, 1, 1],
+        }
+    }
+    fn source(mut self, source: F) -> Self {
+        self.source_fn.replace(source);
+        self
+    }
+    fn buffers(mut self, slices: &'a [WgpuBufferSlice<'a>]) -> Self {
+        self.slices = slices;
+        self
+    }
+    fn push_constants(mut self, push_constants: &[u32]) -> Self {
+        self.push_constants[..push_constants.len()]
+            .copy_from_slice(push_constants);
+        self.push_constant_size = push_constants.len();
+        self
+    }
+    fn work_groups(mut self, work_groups: [u32; 3]) -> Self {
+        self.work_groups = work_groups;
+        self
     }
 }
 
+struct ComputeTask {
+    key: String,
+    bind_group: BindGroup,
+    push_constants: [u32; 128/4],
+    push_constant_size: usize,
+    work_groups: [u32; 3],
+}
+
 fn shader_to_spirv(
-    source: impl AsRef<str>,
-    shader_type: glsl_to_spirv::ShaderType,
-) -> Result<ShaderModuleSource<'static>, Box<dyn Error>> {
+    source: impl AsRef<str>
+) -> ShaderModuleSource<'static> {
     use std::io::Read;
-    let mut spirv_file = glsl_to_spirv::compile(source.as_ref(), shader_type)?;
+    let source = source.as_ref();
+    //println!("{}", &source);
+    let mut spirv_file = glsl_to_spirv::compile(source, glsl_to_spirv::ShaderType::Compute)
+        .unwrap();
     let mut spirv_u8 = Vec::new();
-    spirv_file.read_to_end(&mut spirv_u8)?;
+    spirv_file.read_to_end(&mut spirv_u8)
+        .unwrap();
     debug_assert_eq!(spirv_u8.len() % 4, 0);
     debug_assert_eq!(spirv_u8.capacity() % 4, 0);
     let spirv_u32 = unsafe {
@@ -71,16 +114,199 @@ fn shader_to_spirv(
         )
     };
     std::mem::forget(spirv_u8);
-    Ok(ShaderModuleSource::SpirV(spirv_u32.into()))
+    ShaderModuleSource::SpirV(spirv_u32.into())
+}
+
+struct BufferCopyBuilder<'a> {
+    source: &'a WgpuBuffer,
+    source_offset: wgpu::BufferAddress,
+    destination: &'a WgpuBuffer,
+    destination_offset: wgpu::BufferAddress,
+    copy_size: wgpu::BufferAddress
+}
+
+impl<'a> BufferCopyBuilder<'a> {
+    fn new(source: &'a WgpuBuffer, destination: &'a WgpuBuffer, copy_size: wgpu::BufferAddress) -> Self {
+        Self {
+            source,
+            source_offset: 0,
+            destination,
+            destination_offset: 0,
+            copy_size
+        }
+    }
+}
+
+struct WebGpuBaseGuard<'a> {
+    device: &'a WgpuDevice,
+    queue: &'a Queue,
+    base: MutexGuard<'a, WebGpuBase>
+}
+
+impl<'a> WebGpuBaseGuard<'a> {
+    fn compute_task(&mut self, task: ComputeTaskBuilder<impl Fn() -> String>) {
+        let device = self.device;
+        let queue = self.device;
+        let base = &mut self.base;
+        
+        let ComputeTaskBuilder {
+            key,
+            source_fn,
+            slices,
+            push_constants,
+            push_constant_size,
+            work_groups,
+        } = task;
+        
+        let descriptor = base.compute_descriptors.entry(key.clone())
+            .or_insert_with(|| {
+                let spirv = shader_to_spirv(&source_fn.unwrap()());
+                let shader = device.create_shader_module(spirv);
+             
+                let mut bind_group_layout_entries: [wgpu::BindGroupLayoutEntry; 8] = unsafe { std::mem::uninitialized() };
+                (0 .. slices.len())
+                    .zip(&mut bind_group_layout_entries)
+                    .for_each(|(i, entry)| {
+                        *entry = wgpu::BindGroupLayoutEntry {
+                            binding: i as _,
+                            visibility: wgpu::ShaderStage::COMPUTE,
+                            ty: wgpu::BindingType::StorageBuffer {
+                                dynamic: false,
+                                readonly: false,
+                                min_binding_size: wgpu::BufferSize::new(4),
+                            },
+                            count: None,
+                        }
+                    });
+                
+                let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &bind_group_layout_entries[..slices.len()]
+                });
+                
+                let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[wgpu::PushConstantRange {
+                        stages: wgpu::ShaderStage::COMPUTE,
+                        range: 0..(push_constant_size * 4) as _,
+                    }],
+                });
+
+                let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: None,
+                    layout: Some(&pipeline_layout),
+                    compute_stage: wgpu::ProgrammableStageDescriptor {
+                        module: &shader,
+                        entry_point: "main",
+                    },
+                });
+             
+                ComputeDescriptor {
+                    bind_group_layout,
+                    compute_pipeline
+                }
+            });
+            
+        let mut bind_group_entries: [wgpu::BindGroupEntry; 8] = unsafe { std::mem::uninitialized() };
+        slices.iter()
+            .zip(bind_group_entries.as_mut())
+            .enumerate()
+            .for_each(|(i, (slice, bind_group_entry))| {
+                *bind_group_entry = wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: wgpu::BindingResource::Buffer(*slice)
+                };
+            }); 
+                
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &descriptor.bind_group_layout,
+            entries: &bind_group_entries[..slices.len()],
+        });  
+        
+        base.compute_tasks.push(ComputeTask {
+            key,
+            bind_group,
+            push_constants,
+            push_constant_size,
+            work_groups,
+        });
+    }
+    fn copy_buffer_to_buffer(&mut self, copy: BufferCopyBuilder) {
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: None }
+        );
+        
+        encoder.copy_buffer_to_buffer(
+            copy.source,
+            copy.source_offset,
+            copy.destination,
+            copy.destination_offset,
+            copy.copy_size
+        );
+        
+        self.synchronize(Some(encoder.finish()));
+    }
+    fn synchronize(&mut self, copy: Option<CommandBuffer>) {  
+        if !self.base.compute_tasks.is_empty() {
+            let mut encoder = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: None }
+            );
+        
+            let tasks = std::mem::replace(&mut self.base.compute_tasks, Vec::new());
+            
+            {
+                let mut cpass = encoder.begin_compute_pass();
+                
+                tasks.iter()
+                    .for_each(|t| {
+                        cpass.set_bind_group(0, &t.bind_group, &[]);
+                        
+                        let descriptor = self.base.compute_descriptors.get(&t.key)
+                            .unwrap();
+                        cpass.set_pipeline(&descriptor.compute_pipeline); 
+                        
+                        if t.push_constant_size > 0 {
+                            cpass.set_push_constants(0, &t.push_constants[..t.push_constant_size]);
+                        }
+                        let [wgx, wgy, wgz] = t.work_groups;
+                        cpass.dispatch(wgx, wgy, wgz);
+                    });
+            }
+            
+            let compute = encoder.finish();
+            
+            self.queue.submit(
+                Some(compute)
+                    .into_iter()
+                    .chain(copy)
+            );
+        }
+        else {
+            if copy.is_some() {
+                self.queue.submit(copy);
+            }
+        };
+    
+        self.base.buffers.clear();
+    } 
+}
+
+#[derive(Default)]
+struct WebGpuBase {
+    compute_descriptors: HashMap<String, ComputeDescriptor>,
+    compute_tasks: Vec<ComputeTask>,
+    buffers: Vec<WgpuBuffer>,
 }
 
 pub struct WebGpu {
     instance: Instance,
     adapter: Adapter,
-    device: WgpuDevice,
     index: usize,
+    device: WgpuDevice,
     queue: Queue,
-    shaders: RwLock<HashMap<String, ShaderModule>>,
+    base: Mutex<WebGpuBase>,
 }
 
 impl WebGpu {
@@ -104,14 +330,14 @@ impl WebGpu {
                     )
                     .await
                     .unwrap();
-                let shaders = RwLock::new(HashMap::new());
+                let base = Mutex::new(WebGpuBase::default());
                 Arc::new(WebGpu {
                     instance,
                     adapter,
-                    device,
                     index,
+                    device,
                     queue,
-                    shaders,
+                    base
                 })
             } else {
                 panic!("No WebGpu Devices!");
@@ -135,30 +361,27 @@ impl WebGpu {
         }
         output.unwrap()
     }
-    fn shader(
-        &self,
-        key: impl AsRef<str>,
-        mut f: impl FnMut() -> Result<ShaderModule, Box<dyn Error>>,
-    ) -> Result<impl Deref<Target = ShaderModule> + '_, Box<dyn Error>> {
-        let key: String = key.as_ref().into();
-        let shaders = self.shaders.read().unwrap();
-        if let Some(shader) = shaders.get(&key) {
-            let shader = unsafe { std::mem::transmute(shader) };
-            Ok(ShaderReadGuard { shaders, shader })
-        } else {
-            std::mem::drop(shaders);
-            {
-                let mut shaders = self.shaders.write().unwrap();
-                shaders.insert(key.clone(), f()?);
-            }
-            let shaders = self.shaders.read().unwrap();
-            let shader = shaders.get(&key).unwrap();
-            let shader = unsafe { std::mem::transmute(shader) };
-            Ok(ShaderReadGuard { shaders, shader })
-        }
+    fn base(&self) -> LockResult<WebGpuBaseGuard> {
+        self.base.lock()
+            .map(|base| {
+                WebGpuBaseGuard {
+                    device: &self.device,
+                    queue: &self.queue,
+                    base
+                }
+            })
+            .map_err(|e| {
+                PoisonError::new(WebGpuBaseGuard {
+                    device: &self.device,
+                    queue: &self.queue,
+                    base: e.into_inner()
+                })
+            })
     }
     pub fn synchronize(&self) {
-        self.queue.submit(None);
+        self.base()
+            .unwrap()
+            .synchronize(None);
     }
 }
 
@@ -169,7 +392,7 @@ impl Debug for WebGpu {
 }
 
 pub struct WebBuffer<T: Num> {
-    buffer: ManuallyDrop<WgpuBuffer>,
+    buffer: Option<WgpuBuffer>,
     len: usize,
     gpu: Arc<WebGpu>,
     _m: PhantomData<T>,
@@ -179,128 +402,88 @@ impl<T: Num> WebBuffer<T> {
     fn default_usage() -> BufferUsage {
         BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::COPY_SRC // | BufferUsage::MAP_READ //| BufferUsage::MAP_WRITE
     }
-    pub /*(super)*/ unsafe fn uninitialized(gpu: &Arc<WebGpu>, len: usize) -> Self {
+    pub(super) unsafe fn uninitialized(gpu: &Arc<WebGpu>, len: usize) -> Self {
         let gpu = gpu.clone();
         
-        let mut size = (len * std::mem::size_of::<T>()) as wgpu::BufferAddress;
-        size += wgpu::COPY_BUFFER_ALIGNMENT - (size % wgpu::COPY_BUFFER_ALIGNMENT);
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: Self::default_usage(),
-            mapped_at_creation: false,
-        });
-        
-        gpu.queue.submit(None);
+        let buffer = if len > 0 {
+            let mut size = (len * std::mem::size_of::<T>()) as wgpu::BufferAddress;
+            size += wgpu::COPY_BUFFER_ALIGNMENT - (size % wgpu::COPY_BUFFER_ALIGNMENT);
+            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: Self::default_usage(),
+                mapped_at_creation: false,
+            });
+            Some(buffer)
+        }
+        else {
+            None
+        };
         
         Self {
-            buffer: ManuallyDrop::new(buffer),
+            buffer,
             len,
             gpu,
             _m: <_>::default(),
         }
     }
     pub(super) fn fill(&mut self, elem: T) {
-        let gpu = &self.gpu;
-        let device = &gpu.device;
-        
-        let local_size = 1024;
+        if let Some(buffer) = &self.buffer {
+            let gpu = &self.gpu;
+            let device = &gpu.device;
+            
+            let local_size = 1024;
 
-        let src = include_str!("webgpu/fill/fill.comp");
-        let shader_name = format!("fill_{}_{}", T::type_name(), local_size);
+            let src = include_str!("webgpu/fill/fill.comp");
+            let shader_name = format!("fill_{}_{}", T::type_name(), local_size);
 
-        let mut push_constants = [0u32; 1];
-        let len = self.len as u32;
-        let len = if TypeId::of::<T>() == TypeId::of::<u8>() {
-            bytemuck::cast_slice_mut(push_constants.as_mut()).copy_from_slice(&[elem; 4]);
-            if len < 4 {
-                1
-            }
-            else if len % 4 == 0 {
-                len / 4    
+            let mut push_constants = [0u32; 1];
+            let len = self.len as u32;
+            let len = if TypeId::of::<T>() == TypeId::of::<u8>() {
+                bytemuck::cast_slice_mut(push_constants.as_mut()).copy_from_slice(&[elem; 4]);
+                if len < 4 {
+                    1
+                }
+                else if len % 4 == 0 {
+                    len / 4    
+                }
+                else {
+                    len / 4 + 1 
+                }
             }
             else {
-                len / 4 + 1 
+                bytemuck::cast_slice_mut(push_constants.as_mut())[0] = elem;
+                len
+            }; 
+            
+            let work_groups = if len < local_size {
+                1
             }
+            else if len % local_size == 0 {
+                len / local_size
+            }
+            else {
+                len / local_size + 1
+            };
+            
+            let slices = &[buffer.slice(..)];
+            
+            let task = ComputeTaskBuilder::new(shader_name)
+                .source(|| format!(
+                    "#version 450\n#define T {}\n#define LOCAL_SIZE {}\n{}", 
+                    T::shader_type(),
+                    local_size,
+                    src
+                ))
+                .buffers(slices)
+                .push_constants(&push_constants)
+                .work_groups([work_groups, 1, 1]);
+                
+            
+            gpu.base()
+                .unwrap()
+                .compute_task(task);
         }
-        else {
-            bytemuck::cast_slice_mut(push_constants.as_mut())[0] = elem;
-            len
-        }; 
-        
-        let work_groups = if len < local_size {
-            1
-        }
-        else if len % local_size == 0 {
-            len / local_size
-        }
-        else {
-            len / local_size + 1
-        };
-        
-        let shader = gpu
-            .shader(&shader_name, || {
-                let mut source = String::from("#version 450\n");
-                source.push_str(&format!("#define T {}\n", T::shader_type()));
-                source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-                source.push_str(src);
-                let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-                Ok(device.create_shader_module(spirv))
-            })
-            .unwrap();
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            }],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(self.buffer.slice(..)),
-            }],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStage::COMPUTE,
-                range: 0..32,
-            }],
-        });
-
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            compute_stage: wgpu::ProgrammableStageDescriptor {
-                module: &shader,
-                entry_point: "main",
-            },
-        });
-
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut cpass = encoder.begin_compute_pass();
-            cpass.set_pipeline(&compute_pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.set_push_constants(0, &push_constants); 
-            cpass.dispatch(work_groups, 1, 1);
-        }
-
-        gpu.queue.submit(Some(encoder.finish()));
     }
     pub(super) fn zeros(gpu: &Arc<WebGpu>, len: usize) -> Self {
         Self::from_elem(gpu, T::zero(), len)
@@ -320,29 +503,37 @@ impl<T: Num> WebBuffer<T> {
         let gpu = gpu.clone();
         
         let len = slice.len();
-
-        let buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(slice),
-                usage: Self::default_usage(),
-            });
         
-        gpu.queue.submit(None);
+        let buffer = if len > 0 {
+            let buffer = gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(slice),
+                    usage: Self::default_usage(),
+                });
+            Some(buffer)
+        }
+        else {
+            None
+        };
 
         Self {
-            buffer: ManuallyDrop::new(buffer),
+            buffer,
             len,
             gpu,
             _m: <_>::default(),
         }
     }
     pub(super) fn copy_from_slice(&mut self, slice: &[T]) {
-        let gpu = &self.gpu;
+        unimplemented!();
         
-        gpu.queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(slice));
-        
+        /*if let Some(buffer) = &self.buffer {
+            let gpu = &self.gpu;
+            gpu.queue.write_buffer(buffer, 0, bytemuck::cast_slice(slice));
+        }
+        else {
+            debug_assert_eq!(slice.len(), 0);
+        }*/
         /*
         use futures::task::LocalSpawnExt;
                 
@@ -374,78 +565,47 @@ impl<T: Num> WebBuffer<T> {
         */
     }
     pub(super) fn to_vec(&self) -> Vec<T> {
-        use futures::task::LocalSpawnExt;
-        
-        let gpu = &self.gpu;
-        
-        let mut size = (self.len * std::mem::size_of::<T>()) as wgpu::BufferAddress;
-        size += wgpu::COPY_BUFFER_ALIGNMENT - (size % wgpu::COPY_BUFFER_ALIGNMENT);
-        let tmp_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
-            mapped_at_creation: false,
-        });
-        
-        //gpu.queue.submit(None);
-        
-        let mut encoder = gpu.device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        
-        encoder.copy_buffer_to_buffer(
-            &self.buffer,
-            0,
-            &tmp_buffer,
-            0,
-            size
-        );
-        
-        gpu.queue.submit(Some(encoder.finish()));
-        
-        let slice = tmp_buffer.slice(..);
-        let slice_future = slice.map_async(wgpu::MapMode::Read);
-        
-        gpu.device.poll(wgpu::Maintain::Wait);
-
-        /*{
-            let mut pool = LocalPool::new();
-            let spawner = pool.spawner();
-            spawner
-                .spawn_local(async {
-                    slice_future.await.unwrap();
-                })
-                .unwrap();
-            pool.run();
-        }*/
-        
-        let vec = bytemuck::cast_slice(&slice.get_mapped_range())[..self.len]
-                .to_vec();
-        
-        tmp_buffer.unmap();
-        
-        vec
-        /*
-        use futures::task::LocalSpawnExt;
-        
-        let gpu = &self.gpu;
-        
-        let slice = self.buffer.slice(..);
-        let slice_future = slice.map_async(wgpu::MapMode::Read);
-
-        let mut pool = LocalPool::new();
-        let spawner = pool.spawner();
-        spawner
-            .spawn_local(async {
-                slice_future.await.unwrap();
-            })
-            .unwrap();
-        pool.run();
-        
-        let vec = bytemuck::cast_slice(&slice.get_mapped_range())[..self.len]
-                .to_vec();
-        
-        self.buffer.unmap();
-        vec*/
+        if let Some(buffer) = &self.buffer {
+            
+            let gpu = &self.gpu;
+            
+            let size = (self.len * std::mem::size_of::<T>()) as wgpu::BufferAddress;
+            let size = size + wgpu::COPY_BUFFER_ALIGNMENT - (size % wgpu::COPY_BUFFER_ALIGNMENT);
+            let tmp_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+                mapped_at_creation: false,
+            });
+            
+            gpu.base()
+                .unwrap()
+                .copy_buffer_to_buffer(
+                    BufferCopyBuilder::new(
+                        buffer, &tmp_buffer, size
+                    ) 
+                );
+            
+            let slice = tmp_buffer.slice(..);
+            let slice_future = slice.map_async(wgpu::MapMode::Read);
+            
+            gpu.device.poll(wgpu::Maintain::Wait);
+            
+            let vec = bytemuck::cast_slice(&slice.get_mapped_range())[..self.len]
+                    .to_vec();
+            
+            tmp_buffer.unmap();
+            
+            vec
+        }
+        else {
+            Vec::new()
+        }
+    }
+    fn slice(&self, bounds: impl std::ops::RangeBounds<wgpu::BufferAddress>) -> WgpuBufferSlice {
+        self.buffer.as_ref()
+            .unwrap()
+            .slice(..)
     }
     pub(super) fn len(&self) -> usize {
         self.len
@@ -458,14 +618,15 @@ impl<T: Num> Clone for WebBuffer<T> {
     }
 }
 
+/*
 impl<T: Num> Drop for WebBuffer<T> {
     fn drop(&mut self) {
-        unsafe {
-            ManuallyDrop::drop(&mut self.buffer);
+        if let Some(buffer) = self.buffer.take() {
+            // move buffer into gpu_base
         }
-        self.gpu.queue.submit(None);
     }
-}
+}*/
+
 
 fn cast<T1: Num, S1: DataRef<Elem=T1>, T2: Num, S2: DataMut<Elem=T2>, D: Dimension>(input: &TensorBase<S1, D>, output: &mut TensorBase<S2, D>) {
     use num_traits::Bounded;
@@ -495,91 +656,33 @@ fn cast<T1: Num, S1: DataRef<Elem=T1>, T2: Num, S2: DataMut<Elem=T2>, D: Dimensi
     let src = include_str!("webgpu/cast/cast.comp");
     let shader_name = format!("cast_{}_{}_{}", T1::type_name(), T2::type_name(), local_size);
     
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T1 {}\n", T1::shader_type()));
-            source.push_str(&format!("#define T2 {}\n", T2::shader_type()));
-            source.push_str(&format!("#define SCALE 1/T2({})\n", T1::max_value()));
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            if (TypeId::of::<T1>() == TypeId::of::<u8>()) {
-                source.push_str("#define T1_BYTE");
+    let slices = &[x.slice(..), y.slice(..)];
+    
+    let task = ComputeTaskBuilder::new(shader_name)
+        .source(|| {
+            let t1_byte = if TypeId::of::<T1>() == TypeId::of::<u8>() {
+                "#define T1_BYTE\n"
             }
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
+            else {
+                ""
+            };
+            format!(
+                "#version 450\n#define T1 {}\n#define T2 {}\n#define SCALE 1/T2({})\n#define LOCAL_SIZE {}\n{}{}",
+                T1::shader_type(),
+                T2::shader_type(),
+                T1::max_value(),
+                local_size,
+                t1_byte,
+                src
+            )
         })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(y.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..4*2,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
+        .buffers(slices)
+        .push_constants(push_constants)
+        .work_groups([work_groups, 1, 1]);
+    
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }
 
 fn cast_one_hot<T1: Unsigned, S1: DataRef<Elem=T1>, T2: Num, S2: DataMut<Elem=T2>>(input: &TensorBase<S1, Ix1>, output: &mut TensorBase<S2, Ix2>) {
@@ -610,91 +713,33 @@ fn cast_one_hot<T1: Unsigned, S1: DataRef<Elem=T1>, T2: Num, S2: DataMut<Elem=T2
     let src = include_str!("webgpu/cast/cast.comp");
     let shader_name = format!("cast_one_hot_{}_{}_{}", T1::type_name(), T2::type_name(), local_size);
     
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T1 {}\n", T1::shader_type()));
-            source.push_str(&format!("#define T2 {}\n", T2::shader_type()));
-            source.push_str("#define ONE_HOT\n");
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            if (TypeId::of::<T1>() == TypeId::of::<u8>()) {
-                source.push_str("#define T1_BYTE");
+    let slices = &[x.slice(..), y.slice(..)];
+    
+    let task = ComputeTaskBuilder::new(shader_name)
+        .source(|| {
+            let t1_byte = if TypeId::of::<T1>() == TypeId::of::<u8>() {
+                "#define T1_BYTE\n"
             }
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
+            else {
+                ""
+            };
+            format!(
+                "#version 450\n#define T1 {}\n#define T2 {}\n#define ONE_HOT\n#define SCALE 1/T2({})\n#define LOCAL_SIZE {}\n{}{}",
+                T1::shader_type(),
+                T2::shader_type(),
+                T1::max_value(),
+                local_size,
+                t1_byte,
+                src
+            )
         })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(y.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..4*2,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
+        .buffers(slices)
+        .push_constants(push_constants)
+        .work_groups([work_groups, 1, 1]);
+    
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }
 
 pub(super) fn unsigned_to_f32<
@@ -746,7 +791,6 @@ fn axpy<T: Num>(
     incy: i32,
 ) {
     let gpu = &x.gpu;
-    let device = &gpu.device;
 
     let local_size = 1024;
 
@@ -770,88 +814,25 @@ fn axpy<T: Num>(
         incy,
     }];
     let push_constants = bytemuck::cast_slice(push_constants);
-
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T {}\n", T::shader_type()));
-            source.push_str(&format!("#define N {}\n", n));
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
-        })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(y.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..(4 * push_constants.len()) as u32,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
+    
+    let slices = &[x.slice(..), y.slice(..)];
+            
+    let task = ComputeTaskBuilder::new(shader_name)
+        .source(|| format!(
+            "#version 450\n#define T {}\n#define N {}\n#define LOCAL_SIZE {}\n{}", 
+            T::shader_type(),
+            n,
+            local_size,
+            src
+        ))
+        .buffers(slices)
+        .push_constants(&push_constants)
+        .work_groups([work_groups, 1, 1]);
+        
+    
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }
 
 pub(super) fn scaled_add<S1: DataMut<Elem = f32>, S2: DataRef<Elem = f32>, D: Dimension>(
@@ -900,18 +881,18 @@ pub(super) fn gemm<S1: DataRef<Elem = f32>, S2: DataRef<Elem = f32>, S3: DataMut
         b.as_web_buffer().unwrap(),
         c.as_mut_web_buffer().unwrap(),
     )
-    .alpha(alpha)
-    .a_shape(a_shape)
-    .b_shape(b_shape)
-    .beta(beta)
-    .c_shape(c_shape)
-    .exec_v1();
+        .alpha(alpha)
+        .a_shape(a_shape)
+        .b_shape(b_shape)
+        .beta(beta)
+        .c_shape(c_shape)
+        .exec_v1();
 }
 
 pub(super) fn broadcast<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D: Dimension>(
     input: &TensorBase<S1, D>,
     output: &mut TensorBase<S2, D::Larger>,
-) {
+) { 
     let gpu = input.device().web().unwrap();
     let device = &gpu.device;
     
@@ -937,86 +918,22 @@ pub(super) fn broadcast<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D:
     let src = include_str!("webgpu/broadcast/broadcast.comp");
     let shader_name = format!("broadcast_{}_{}", T::type_name(), local_size);
     
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T {}\n", T::shader_type()));
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
-        })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            }
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(y.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..4*2,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
+    let slices = &[x.slice(..), y.slice(..)];
+    
+    let task = ComputeTaskBuilder::new(&shader_name)
+        .source(|| format!(
+            "#version 450\n#define T {}\n#define LOCAL_SIZE {}\n{}",
+            T::shader_type(),
+            local_size,
+            src
+        ))
+        .buffers(slices)
+        .push_constants(push_constants)
+        .work_groups([work_groups, 1, 1]);
+        
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }
 
 pub(super) fn broadcast_backward<T: Num, S1: DataMut<Elem = T>, S2: DataRef<Elem = T>, D: Dimension>(
@@ -1048,87 +965,24 @@ pub(super) fn broadcast_backward<T: Num, S1: DataMut<Elem = T>, S2: DataRef<Elem
     let src = include_str!("webgpu/broadcast/broadcast_backward.comp");
     let shader_name = format!("broadcast_backward_{}_{}_{}", T::type_name(), nclasses, local_size);
     
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T {}\n", T::shader_type()));
-            source.push_str(&format!("#define C {}\n", nclasses));
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
-        })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            }
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(dx.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(dy.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..4,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
+    
+    let slices = &[dx.slice(..), dy.slice(..)];
+    
+    let task = ComputeTaskBuilder::new(&shader_name)
+        .source(|| format!(
+            "#version 450\n#define T {}\n#define C {}\n#define LOCAL_SIZE {}\n{}",
+            T::shader_type(),
+            nclasses,
+            local_size,
+            src
+        ))
+        .buffers(slices)
+        .push_constants(push_constants)
+        .work_groups([work_groups, 1, 1]);
+        
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }
 
 pub(super) fn reduce_sum<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D: Dimension>(
@@ -1145,7 +999,10 @@ pub(super) fn reduce_sum<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D
     let mut tmp: WebBuffer<T>;
     let mut y = output.as_mut_web_buffer().unwrap();
     
-    let (x, command_partial) = if len > (2 * local_size) {
+    let mut base = gpu.base()
+        .unwrap();
+    
+    let x = if len > (2 * local_size) {
         let work_groups = if len % (2 * local_size) == 0 {
             len / (2 * local_size)
         }
@@ -1163,180 +1020,44 @@ pub(super) fn reduce_sum<T: Num, S1: DataRef<Elem = T>, S2: DataMut<Elem = T>, D
         let src = include_str!("webgpu/reduce/reduce_partial.comp");
         let shader_name = format!("reduce_sum_partial_{}_{}", T::type_name(), local_size);
         
-        let shader = gpu
-            .shader(&shader_name, || {
-                let mut source = String::from("#version 450\n");
-                source.push_str(&format!("#define T {}\n", T::shader_type()));
-                source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-                source.push_str(src);
-                let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-                Ok(device.create_shader_module(spirv))
-            })
-            .unwrap();
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStage::COMPUTE,
-                    ty: wgpu::BindingType::StorageBuffer {
-                        dynamic: false,
-                        readonly: true,
-                        min_binding_size: wgpu::BufferSize::new(4),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStage::COMPUTE,
-                    ty: wgpu::BindingType::StorageBuffer {
-                        dynamic: false,
-                        readonly: false,
-                        min_binding_size: wgpu::BufferSize::new(4),
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(tmp.buffer.slice(..)),
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStage::COMPUTE,
-                range: 0..4,
-            }],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            compute_stage: wgpu::ProgrammableStageDescriptor {
-                module: &shader,
-                entry_point: "main",
-            },
-        });
-
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut cpass = encoder.begin_compute_pass();
-            cpass.set_pipeline(&pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.set_push_constants(0, &push_constants);
-            cpass.dispatch(work_groups, 1, 1);
-        }
-        (&tmp, Some(encoder.finish()))
+        let slices = &[x.slice(..), tmp.slice(..)];
+    
+        let partial_sum = ComputeTaskBuilder::new(&shader_name)
+            .source(|| format!(
+                "#version 450\n#define T {}\n#define LOCAL_SIZE {}\n{}",
+                T::shader_type(),
+                local_size,
+                src
+            ))
+            .buffers(slices)
+            .push_constants(push_constants)
+            .work_groups([work_groups, 1, 1]);
+            
+        base.compute_task(partial_sum);
         
+        &tmp
     } else {
-        (x, None)
+        x
     };
     
-    let command_final = {
+    {
         let n = x.len() as u32;
         
         let src = include_str!("webgpu/reduce/reduce_final.comp");
         let shader_name = format!("reduce_sum_final_{}_{}", T::type_name(), n);
         
-        let shader = gpu
-            .shader(&shader_name, || {
-                let mut source = String::from("#version 450\n");
-                source.push_str(&format!("#define T {}\n", T::shader_type()));
-                source.push_str(&format!("#define N {}\n", n));
-                source.push_str(src);
-                let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-                Ok(device.create_shader_module(spirv))
-            })
-            .unwrap();
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStage::COMPUTE,
-                    ty: wgpu::BindingType::StorageBuffer {
-                        dynamic: false,
-                        readonly: true,
-                        min_binding_size: wgpu::BufferSize::new(4),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStage::COMPUTE,
-                    ty: wgpu::BindingType::StorageBuffer {
-                        dynamic: false,
-                        readonly: false,
-                        min_binding_size: wgpu::BufferSize::new(4),
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(y.buffer.slice(..)),
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            compute_stage: wgpu::ProgrammableStageDescriptor {
-                module: &shader,
-                entry_point: "main",
-            },
-        });
-
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut cpass = encoder.begin_compute_pass();
-            cpass.set_pipeline(&pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch(1, 1, 1);
-        }
-        encoder.finish()
-    };
+        let slices = &[x.slice(..), y.slice(..)];
     
-    if let Some(command_partial) = command_partial {
-        gpu.queue.submit(Some(command_partial).into_iter().chain(Some(command_final)));
-    }
-    else {
-        gpu.queue.submit(Some(command_final));
+        let final_sum = ComputeTaskBuilder::new(&shader_name)
+            .source(|| format!(
+                "#version 450\n#define T {}\n#define N {}\n{}",
+                T::shader_type(),
+                n,
+                src
+            ))
+            .buffers(slices);
+        
+        base.compute_task(final_sum);
     }
 }
 
@@ -1378,101 +1099,23 @@ pub(super) fn cross_entropy<
     let src = include_str!("webgpu/cross_entropy/cross_entropy.comp");
     let shader_name = format!("cross_entropy_{}_{}_{}", T::type_name(), n, local_size);
     
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T {}\n", T::shader_type()));
-            source.push_str(&format!("#define C {}\n", n));
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
-        })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(t.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(y.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..4,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
+    let slices = &[x.slice(..), t.slice(..), y.slice(..)];
+    
+    let task = ComputeTaskBuilder::new(&shader_name)
+        .source(|| format!(
+            "#version 450\n#define T {}\n#define C {}\n#define LOCAL_SIZE {}\n{}",
+            T::shader_type(),
+            n,
+            local_size,
+            src
+        ))
+        .buffers(slices)
+        .push_constants(push_constants)
+        .work_groups([work_groups, 1, 1]);
+        
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }
 
 pub(super) fn cross_entropy_backward<
@@ -1513,113 +1156,20 @@ pub(super) fn cross_entropy_backward<
     let src = include_str!("webgpu/cross_entropy/cross_entropy_backward.comp");
     let shader_name = format!("cross_entropy_backward_{}_{}", T::type_name(), local_size);
     
-    let shader = gpu
-        .shader(&shader_name, || {
-            let mut source = String::from("#version 450\n");
-            source.push_str(&format!("#define T {}\n", T::shader_type()));
-            source.push_str(&format!("#define LOCAL_SIZE {}\n", local_size));
-            source.push_str(src);
-            let spirv = shader_to_spirv(&source, glsl_to_spirv::ShaderType::Compute)?;
-            Ok(device.create_shader_module(spirv))
-        })
-        .unwrap();
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: true,
-                    min_binding_size: wgpu::BufferSize::new(4),
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(x.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(dx.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(t.buffer.slice(..)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Buffer(dy.buffer.slice(..)),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStage::COMPUTE,
-            range: 0..4,
-        }],
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        compute_stage: wgpu::ProgrammableStageDescriptor {
-            module: &shader,
-            entry_point: "main",
-        },
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut cpass = encoder.begin_compute_pass();
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &push_constants);
-        cpass.dispatch(work_groups, 1, 1);
-    }
-    gpu.queue.submit(Some(encoder.finish()));
-
+    let slices = &[x.slice(..), dx.slice(..), t.slice(..), dy.slice(..)];
+    
+    let task = ComputeTaskBuilder::new(&shader_name)
+        .source(|| format!(
+            "#version 450\n#define T {}\n#define LOCAL_SIZE {}\n{}",
+            T::shader_type(),
+            local_size,
+            src
+        ))
+        .buffers(slices)
+        .push_constants(push_constants)
+        .work_groups([work_groups, 1, 1]);
+        
+    gpu.base()
+        .unwrap()
+        .compute_task(task);
 }

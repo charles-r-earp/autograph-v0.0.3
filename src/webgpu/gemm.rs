@@ -1,4 +1,4 @@
-use super::{shader_to_spirv, WebBuffer};
+use super::{WebBuffer, ComputeTaskBuilder};
 use crate::Num;
 use bytemuck::{Pod, Zeroable};
 
@@ -164,14 +164,14 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
         let a = &self.a;
         let gpu = &a.gpu;
         assert_eq!(a.len as u32, m * k);
-        let a = &a.buffer;
+        //let a = &a.buffer.as_ref().unwrap();
 
         let b = &self.b;
         assert_eq!(b.len as u32, k * n);
-        let b = &b.buffer;
-        let mut c = &mut self.c;
+        //let b = &b.buffer.as_ref().unwrap();
+        let c = &self.c;
         assert_eq!(c.len as u32, m * n);
-        let c = &mut c.buffer;
+        //let c = &c.buffer.as_ref().unwrap();
 
         let shader_name = format!(
             "gemm_v1_{}__{}_{}_{}__{}_{}_{}",
@@ -185,7 +185,27 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
         );
 
         let device = &gpu.device;
+        
+        let slices = &[a.slice(..), b.slice(..), c.slice(..)];
+                
+        let task = ComputeTaskBuilder::new(shader_name)
+            .source(|| format!(
+                "#version 450\n#define T {}\n#define M {}\n#define K {}\n#define N {}\n#define M_TILE {}\n#define K_TILE {}\n#define N_TILE {}\n{}", 
+                T::shader_type(),
+                m, k, n,
+                m_tile, k_tile, n_tile,
+                src
+            ))
+            .buffers(slices)
+            .push_constants(&push_constants)
+            .work_groups([work_size_x, work_size_y, 1]);
+        
+    
+        gpu.base()
+            .unwrap()
+            .compute_task(task);
 
+        /*
         let shader = gpu
             .shader(&shader_name, || {
                 let mut source = String::new();
@@ -286,6 +306,6 @@ impl<'a, 'b, 'c, T: Num> Gemm<'a, 'b, 'c, T> {
             cpass.dispatch(work_size_x as _, work_size_y as _, 1);
         }
 
-        gpu.queue.submit(Some(encoder.finish()));
+        gpu.queue.submit(Some(encoder.finish()));*/
     }
 }
